@@ -2,6 +2,14 @@
 
 import type { Client } from "sinusbot/typings/interfaces/Client"
 
+interface Config {
+  commandName: string
+  groups: {
+    age: number
+    group: number
+  }[]
+}
+
 registerPlugin({
   name: "Age Groups",
   description: "checks the age of a client and assigns a group",
@@ -9,29 +17,37 @@ registerPlugin({
   author: "Multivitamin <david.kartnaller@gmail.com>",
   backends: ["ts3", "discord"],
   vars: [{
+    type: "string",
+    name: "commandName",
+    title: "Command Name which should be used (default: 'dob')",
+    indent: 2,
+    default: "dob"
+  }, {
+    type: "array",
     name: "groups",
     title: "Groups for specific ages",
-    //@ts-ignore
-    type: "array",
     vars: [{
-        name: "age",
-        title: "Age in years",
-        indent: 2,
-        type: "number",
-        default: 0
+      type: "number",
+      name: "age",
+      title: "Age in years",
+      indent: 2,
+      default: 0
     }, {
-        name: "group",
-        title: "ServerGroup",
-        indent: 2,
-        type: "number",
-        default: 0,
+      type: "number",
+      name: "group",
+      title: "ServerGroup",
+      indent: 2,
+      default: 0,
     }]
   }]
-}, (_: null, { groups }: { groups: { age: number, group: number }[] }) => {
+}, (_, config) => {
 
+  const { groups } = <Config>config
+  let { commandName } = <Config>config
   const sortedGroups = groups.sort((g1, g2) => g1.age - g2.age).reverse()
   const availableGroups = groups.map(g => g.group)
 
+  const engine = require("engine")
   const store = require("store")
   const event = require("event")
   const format = require("format")
@@ -57,7 +73,12 @@ registerPlugin({
     const command = require("command")
     const { createCommand, createArgument } = command
 
-    createCommand("dob")
+    if (typeof commandName !== "string" || commandName.length < 1 || (/\s/).test(commandName)) {
+      engine.log(`Invalid command name provided '${commandName}' using fallback name "dob"`)
+      commandName = "dob"
+    }
+
+    createCommand(commandName)
       .help(`sets your personal ${format.bold("d")}ate ${format.bold("o")}f ${format.bold("b")}irth`)
       .manual("sets your date of birth and gives you a group")
       .manual("enter your age in format 'dd.mm.yyyy' or 'dd-mm-yyyy'")

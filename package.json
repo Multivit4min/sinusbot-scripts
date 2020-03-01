@@ -11,9 +11,10 @@
   ],
   "author": "Multivitamin <david.kartnaller@gmail.com>",
   "license": "MIT",
-  "dependencies": {},
+  "dependencies": {
+    "sinusbot": "file:../scripting-docs"
+  },
   "devDependencies": {
-    "sinusbot": "github:SinusBot/scripting-docs#typescript",
     "typescript": "^3.8.3"
   }
 }
