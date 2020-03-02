@@ -4,6 +4,8 @@ import type { Client } from "sinusbot/typings/interfaces/Client"
 
 interface Config {
   commandName: string
+  sendNotifyMessage: number
+  notifyMessage: string
   groups: {
     age: number
     group: number
@@ -20,8 +22,23 @@ registerPlugin({
     type: "string",
     name: "commandName",
     title: "Command Name which should be used (default: 'dob')",
-    indent: 2,
     default: "dob"
+  }, {
+    type: "select",
+    name: "sendNotifyMessage",
+    title: "Send a notification if no date of birth has been set? (default: false)",
+    default: 0,
+    options: ["No", "Yes"]
+  }, {
+    type: "string",
+    name: "notifyMessage",
+    title: "The message which should get sent",
+    indent: 2,
+    default: "",
+    conditions: [{
+      field: "sendNotifyMessage",
+      value: 1
+    }]
   }, {
     type: "array",
     name: "groups",
@@ -42,7 +59,7 @@ registerPlugin({
   }]
 }, (_, config) => {
 
-  const { groups } = <Config>config
+  const { groups, sendNotifyMessage, notifyMessage } = <Config>config
   let { commandName } = <Config>config
   const sortedGroups = groups.sort((g1, g2) => g1.age - g2.age).reverse()
   const availableGroups = groups.map(g => g.group)
@@ -52,7 +69,7 @@ registerPlugin({
   const event = require("event")
   const format = require("format")
   const backend = require("backend")
-  const regex = (/([0-3]?[1-9])[\.\-]([0-1]?[1-9])[\.\-](\d{4})/)
+  const regex = (/(0?[1-9]|[1-2][0-9]|3[0-1])[\.-](0?[1-9]|1[0-2])[\.-](\d{4})/)
   const MINIMUM_SAFE_AGE = 8
 
   type DoB = [number, number, number];
@@ -65,7 +82,7 @@ registerPlugin({
 
   executeAtMidnight(() => validateOnline())
   event.on("connect", () => validateOnline())
-  event.on("clientMove", ev => !ev.fromChannel && validateGroup(ev.client))
+  event.on("clientMove", ev => !ev.fromChannel && onClientConnect(ev.client))
   event.on("serverGroupAdded", ev => !ev.invoker.isSelf() && validateGroup(ev.client))
   event.on("serverGroupRemoved", ev => !ev.invoker.isSelf() && validateGroup(ev.client))
 
@@ -108,6 +125,12 @@ registerPlugin({
       })
   })
 
+  function onClientConnect(client: Client) {
+    if (sendNotifyMessage && validateGroup(client) === GroupResponseCodes.CLIENT_NOT_IN_STORE) {
+      client.chat(notifyMessage)
+    }
+  }
+
   /**
    * persists uid and date of birth to store
    * @param uid uid of the client
@@ -131,7 +154,10 @@ registerPlugin({
    */
   function validateGroup(client: Client) {
     const dob = fetch(client.uid())
-    if (!dob) return GroupResponseCodes.CLIENT_NOT_IN_STORE
+    if (!dob) {
+      whiteListGroup(client, [], availableGroups)
+      return GroupResponseCodes.CLIENT_NOT_IN_STORE
+    }
     const age = getAge(dob)
     const group = getGroupFromAge(age)
     if (group === -1) return GroupResponseCodes.CLIENT_MINIMUM_AGE_FOR_GROUP

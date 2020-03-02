@@ -13,7 +13,7 @@ interface Config {
 registerPlugin({
   name: "Vote Reward",
   engine: ">= 1.0.0",
-  version: "0.1.0",
+  version: "1.0.0",
   description: "Group Vote Rewards for TeamSpeakServers.org",
   author: "Multivitamin <david.kartnaller@gmail.com",
   requiredModules: ["http"],
