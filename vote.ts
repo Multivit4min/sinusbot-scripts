@@ -52,12 +52,12 @@ registerPlugin({
 
 
   const { key, sid, removeTime, rewards } = <Config>config
-
+  let initialized: boolean = false
 
   const rewardSorted = rewards.sort((g1, g2) => g1.amount - g2.amount).reverse()
   const availableGroups = rewards.map(g => g.group)
 
-  const removeAfter = removeTime > 0 ? removeTime * 24 * 60 * 60 * 1000 : -1
+  const removeAfter = removeTime > 0 ? removeTime * 24 * 60 * 60 : -1
 
   const engine = require("engine")
   const event = require("event")
@@ -123,8 +123,8 @@ registerPlugin({
     /** requests to add an item to the store */
     protected requestAdd(item: PartialVoteItem) {
       const hash = this.getHash(item)
-      if (!this.isOld(item)) return false
       if (this.findHash(hash)) return false
+      if (this.isOld(item)) return false
       const newItem = this.createVoteItem(item)
       this.addItem(newItem)
       this.tryMakeClaim(newItem)
@@ -133,8 +133,8 @@ registerPlugin({
 
     /** checks if the item is too old to get added or still be hold in store */
     private isOld(item: PartialVoteItem) {
-      if (removeAfter === -1) return true
-      return item.timestamp >= Math.floor(item.timestamp / 1000) - removeAfter
+      if (removeAfter === -1) return false
+      return item.timestamp < Math.floor(Date.now() / 1000) - removeAfter
     }
   
     /** retrieves the hash value of an item */
@@ -147,27 +147,27 @@ registerPlugin({
       return this.getVotes().find((item: VoteItem) => item.hash === hash)
     }
 
-    /** checks wether an item is unclaimed or not */
-    private isUnclaimed(item: VoteItem) {
-      return item.claimedBy === null
-    }
-
     /** handles a full client check */
     checkClient(client: Client) {
-      this.getUnclaimedByNickname(client.nick())
-        .forEach(item => this.tryMakeClaim(item, client))
+      this.getUnclaimedByNickname(client.nick()).forEach(item => this.tryMakeClaim(item, client))
       this.checkGroups(client)
     }
 
     /** tries to claim a possible not claimed item */
     tryMakeClaim(item: VoteItem, client?: Client) {
       if (!this.isUnclaimed(item)) return false
-      client = !client ? this.getClientByItem(item) : client
+      client = client ? client : this.getClientByItem(item)
       if (!client) return false
       engine.log(`Client ${client.nick()} (${client.uid()}) claims a vote (${item.hash})`)
       this.flagItemClaimed(item, client.uid())
       this.saveItem(item)
+      this.checkGroups(client)
       return true
+    }
+
+    /** checks wether an item is unclaimed or not */
+    private isUnclaimed(item: VoteItem) {
+      return item.claimedBy === null
     }
 
     /** tries to retrieve the client for which the vote is for */
@@ -177,9 +177,11 @@ registerPlugin({
 
     /** validates the groups a client has */
     protected checkGroups(client: Client) {
+      const group = this.getGroupFromVoteCount(this.getVotesByClient(client).length)
+      if (group === -1) return
       return this.whiteListGroup(
         client,
-        [this.getGroupFromVoteCount(this.getVotesByClient(client).length)],
+        [group],
         availableGroups
       )
     }
@@ -233,7 +235,9 @@ registerPlugin({
      * @param nick the nickname to check
      */
     protected getUnclaimedByNickname(nick: string) {
-      return this.getVotes().filter(item => item.nickname === nick && this.isUnclaimed(item))
+      return this.getVotes()
+        .filter(item => this.isUnclaimed(item))
+        .filter(item => item.nickname === nick)
     }
 
     /**
@@ -251,7 +255,7 @@ registerPlugin({
      */
     cron() {
       this.cleanOldItems()
-      this.getVotes()
+      this.check()
     }
 
     /**
@@ -329,6 +333,7 @@ registerPlugin({
       }))
     }
 
+
     private fetchVotes(): Promise<TeamSpeakServersVoteResponse> {
       return new Promise((fulfill, reject) => {
         http.simpleRequest({
@@ -350,22 +355,46 @@ registerPlugin({
 
   const votings: Vote[] = []
 
+  function doGlobalCheck() {
+    votings.forEach(vote => vote.cron())
+    backend.getClients()
+      .filter(c => !c.isSelf())
+      .forEach(c => votings.forEach(v => v.checkClient(c)))
+  }
+  
+  event.on("connect", () => {
+    if (initialized) return
+    initialized = true
+    doGlobalCheck()
+  })
+
+  event.on("disconnect", () => {
+    initialized = false
+  })  
+
+  event.on("clientMove", ({fromChannel, client}) => {
+    if (fromChannel || client.isSelf()) return
+    votings.forEach(v => v.checkClient(client))
+  })
+  
+  event.on("clientNick", client => votings.forEach(v => v.checkClient(client)))
+  event.on("serverGroupAdded", ev => votings.forEach(v => v.checkClient(ev.client)))
+  event.on("serverGroupRemoved", ev => votings.forEach(v => v.checkClient(ev.client)))
+
+  setInterval(() => {
+    if (!backend.isConnected()) return
+    votings.forEach(vote => vote.cron())
+  }, CHECK_INTERVAL)
+
   event.on("load", () => {
+
     const command = require("command")
     const { createCommand } = command
     votings.push(new TeamSpeakServers({ key, sid, createCommand }))
 
-    event.on("clientMove", ({fromChannel, client}) => {
-      if (fromChannel || client.isSelf()) return
-      votings.forEach(v => v.checkClient(client))
-    })
-    
-    event.on("clientNick", client => {
-      votings.forEach(v => v.checkClient(client))
-    })
-    
-    event.on("connect", () => backend.getClients().filter(c => !c.isSelf()).forEach(client => votings.forEach(vote => vote.checkClient(client))))
-
-    setInterval(() => votings.forEach(vote => vote.cron()), CHECK_INTERVAL)
+    if (backend.isConnected()) {
+      initialized = true
+      doGlobalCheck()
+    }
   })
 })
