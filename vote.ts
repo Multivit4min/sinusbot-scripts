@@ -3,14 +3,13 @@
 import type { Client } from "sinusbot/typings/interfaces/Client"
 import type { Command } from "sinusbot/typings/external/command"
 
-interface Config {
+
+registerPlugin<{
   key: string
   sid: string
   removeTime: number
   rewards: { amount: number, group: number }[]
-}
-
-registerPlugin({
+}>({
   name: "Vote Reward",
   engine: ">= 1.0.0",
   version: "1.0.0",
@@ -18,40 +17,40 @@ registerPlugin({
   author: "Multivitamin <david.kartnaller@gmail.com",
   requiredModules: ["http"],
   vars: [{
+    type: "string" as const,
     name: "key",
     title: "TeamSpeak-Servers API Key",
-    type: "string",
     default: ""
   }, {
+    type: "string" as const,
     name: "sid",
     title: "TeamSpeak-Servers Server ID",
-    type: "string",
     default: ""
   }, {
+    type: "number" as const,
     name: "removeTime",
     title: "remove vote when older than x days (default: 30, -1 to disable removal)",
-    type: "number",
     default: 30
   }, {
+    type: "array" as const,
     name: "rewards",
     title: "Group per vote",
-    type: "array",
+    default: [],
     vars: [{
+      type: "number" as const,
       name: "amount",
       title: "Amount of Votes in this month",
-      type: "number",
       default: 0
     }, {
+      type: "number" as const,
       name: "group",
       title: "Group Reward",
-      type: "number",
       default: 0
     }]
   }]
-}, (_, config) => {
+}, (_, { key, sid, removeTime, rewards }, meta) => {
 
 
-  const { key, sid, removeTime, rewards } = <Config>config
   let initialized: boolean = false
 
   const rewardSorted = rewards.sort((g1, g2) => g1.amount - g2.amount).reverse()
@@ -67,7 +66,7 @@ registerPlugin({
   const helpers = require("helpers")
   const CHECK_INTERVAL = 60 * 1000
 
-  
+  /** item structure which will stored */
   interface VoteItem {
     nickname: string,
     timestamp: number,
@@ -81,7 +80,10 @@ registerPlugin({
 
   abstract class Vote {
 
+    /** vote namespace name */
     protected abstract namespace: string
+
+    /** executes the api call and requests via Vote#requestAdd to add the item to store */
     protected abstract check(): Promise<void>
 
     /** initializes store */
@@ -115,6 +117,7 @@ registerPlugin({
       return this
     }
 
+    /** adds a vote item to the store */
     addItem(item: VoteItem) {
       this.setVotes([...this.getVotes(), item])
       return this
@@ -208,7 +211,7 @@ registerPlugin({
 
     /**
      * retrieves the servergroup the amount of counts should get
-     * @param votes the votecount to check
+     * @param votes the amount of votes to retrieve the group
      */
     getGroupFromVoteCount(votes: number) {
       let g = rewardSorted.find(g => g.amount <= votes)
@@ -252,6 +255,7 @@ registerPlugin({
 
     /**
      * interval checks
+     * removes old items from the store
      */
     cron() {
       this.cleanOldItems()
@@ -308,6 +312,9 @@ registerPlugin({
       this.init()
     }
 
+    /**
+     * registers the voting command
+     */
     private registerCommand(createCommand: (cmd: string) => Command) {
       createCommand("vote")
         .help("retrieves the vote link from teamspeak-servers.org")
@@ -334,6 +341,7 @@ registerPlugin({
     }
 
 
+    /** retrieves the votes from the api */
     private fetchVotes(): Promise<TeamSpeakServersVoteResponse> {
       return new Promise((fulfill, reject) => {
         http.simpleRequest({

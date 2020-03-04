@@ -2,7 +2,7 @@
 
 import type { Client } from "sinusbot/typings/interfaces/Client"
 
-interface Config {
+registerPlugin<{
   commandName: string
   sendNotifyMessage: number
   notifyMessage: string
@@ -10,27 +10,25 @@ interface Config {
     age: number
     group: number
   }[]
-}
-
-registerPlugin({
+}>({
   name: "Age Groups",
   description: "checks the age of a client and assigns a group",
   version: "1.0.0",
   author: "Multivitamin <david.kartnaller@gmail.com>",
   backends: ["ts3", "discord"],
   vars: [{
-    type: "string",
+    type: "string" as const,
     name: "commandName",
     title: "Command Name which should be used (default: 'dob')",
     default: "dob"
   }, {
-    type: "select",
+    type: "select" as const,
     name: "sendNotifyMessage",
     title: "Send a notification if no date of birth has been set? (default: false)",
     default: 0,
     options: ["No", "Yes"]
   }, {
-    type: "string",
+    type: "string" as const,
     name: "notifyMessage",
     title: "The message which should get sent",
     indent: 2,
@@ -40,27 +38,26 @@ registerPlugin({
       value: 1
     }]
   }, {
-    type: "array",
+    type: "array" as const,
     name: "groups",
     title: "Groups for specific ages",
+    default: [],
     vars: [{
-      type: "number",
+      type: "number" as const,
       name: "age",
       title: "Age in years",
       indent: 2,
       default: 0
     }, {
-      type: "number",
+      type: "number" as const,
       name: "group",
       title: "ServerGroup",
       indent: 2,
       default: 0,
     }]
   }]
-}, (_, config) => {
+}, (_, { groups, sendNotifyMessage, notifyMessage, commandName }) => {
 
-  const { groups, sendNotifyMessage, notifyMessage } = <Config>config
-  let { commandName } = <Config>config
   const sortedGroups = groups.sort((g1, g2) => g1.age - g2.age).reverse()
   const availableGroups = groups.map(g => g.group)
 
@@ -125,6 +122,7 @@ registerPlugin({
       })
   })
 
+  /** sends a chat message if enabled to the client to request age verification */
   function onClientConnect(client: Client) {
     if (sendNotifyMessage && validateGroup(client) === GroupResponseCodes.CLIENT_NOT_IN_STORE) {
       client.chat(notifyMessage)
