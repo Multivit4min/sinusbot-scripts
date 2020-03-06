@@ -25,7 +25,7 @@ registerPlugin<{
     type: "select" as const,
     name: "sendNotifyMessage",
     title: "Send a notification if no date of birth has been set? (default: false)",
-    default: 0,
+    default: "0",
     options: ["No", "Yes"]
   }, {
     type: "string" as const,

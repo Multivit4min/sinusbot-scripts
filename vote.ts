@@ -4,11 +4,18 @@ import type { Client } from "sinusbot/typings/interfaces/Client"
 import type { Command } from "sinusbot/typings/external/command"
 
 
+interface Reward {
+  amount: number
+  group: number
+  coins: number
+}
+
 registerPlugin<{
   key: string
   sid: string
   removeTime: number
-  rewards: { amount: number, group: number }[]
+  useMulticonomy: "0"|"1"
+  rewards: Reward[]
 }>({
   name: "Vote Reward",
   engine: ">= 1.0.0",
@@ -32,6 +39,12 @@ registerPlugin<{
     title: "remove vote when older than x days (default: 30, -1 to disable removal)",
     default: 30
   }, {
+    type: "select" as const,
+    name: "useMulticonomy",
+    title: "Use multiconomy features?",
+    options: ["No", "Yes"],
+    default: "0"
+  }, {
     type: "array" as const,
     name: "rewards",
     title: "Group per vote",
@@ -46,10 +59,16 @@ registerPlugin<{
       name: "group",
       title: "Group Reward",
       default: 0
+    }, {
+      type: "number" as const,
+      name: "coins",
+      title: "Coin Reward (only if multiconomy is enabled)",
+      default: 0
     }]
   }]
-}, (_, { key, sid, removeTime, rewards }, meta) => {
+}, (_, { key, sid, removeTime, rewards, ...config }) => {
 
+  const multiconomy = config.useMulticonomy === "1"
 
   let initialized: boolean = false
 
@@ -80,14 +99,25 @@ registerPlugin<{
 
   abstract class Vote {
 
+    /** service name of the voting application */
+    protected abstract service: string
+
     /** vote namespace name */
     protected abstract namespace: string
 
     /** executes the api call and requests via Vote#requestAdd to add the item to store */
     protected abstract check(): Promise<void>
 
+    /** economy plugin */
+    protected eco: any
+
+    constructor({ eco }: { eco: any }) {
+      this.eco = eco
+    }
+
     /** initializes store */
     protected init() {
+      this.setVotes([])
       if (!Array.isArray(this.getVotes())) this.setVotes([])
     }
 
@@ -124,13 +154,13 @@ registerPlugin<{
     }
 
     /** requests to add an item to the store */
-    protected requestAdd(item: PartialVoteItem) {
+    protected async requestAdd(item: PartialVoteItem) {
       const hash = this.getHash(item)
       if (this.findHash(hash)) return false
       if (this.isOld(item)) return false
       const newItem = this.createVoteItem(item)
       this.addItem(newItem)
-      this.tryMakeClaim(newItem)
+      await this.tryMakeClaim(newItem)
       return true
     }
 
@@ -151,19 +181,26 @@ registerPlugin<{
     }
 
     /** handles a full client check */
-    checkClient(client: Client) {
-      this.getUnclaimedByNickname(client.nick()).forEach(item => this.tryMakeClaim(item, client))
+    async checkClient(client: Client) {
+      const unclaimed = this.getUnclaimedByNickname(client.nick())
+      await Promise.all(unclaimed.map(item => this.tryMakeClaim(item, client)))
       this.checkGroups(client)
     }
 
     /** tries to claim a possible not claimed item */
-    tryMakeClaim(item: VoteItem, client?: Client) {
+    async tryMakeClaim(item: VoteItem, client?: Client) {
       if (!this.isUnclaimed(item)) return false
       client = client ? client : this.getClientByItem(item)
       if (!client) return false
       engine.log(`Client ${client.nick()} (${client.uid()}) claims a vote (${item.hash})`)
       this.flagItemClaimed(item, client.uid())
       this.saveItem(item)
+      if (multiconomy) {
+        const wallet: any = await this.eco.getWallet(client.uid())
+        const reward = this.getRewardFromVoteCount(this.getVotesByClient(client).length)
+        await wallet.addBalance(reward.coins, `Vote ${this.service}`)
+        client.chat(`You have been rewarded ${reward.coins}${this.eco.getCurrencySign()} for your vote!`)
+      }
       this.checkGroups(client)
       return true
     }
@@ -180,7 +217,7 @@ registerPlugin<{
 
     /** validates the groups a client has */
     protected checkGroups(client: Client) {
-      const group = this.getGroupFromVoteCount(this.getVotesByClient(client).length)
+      const { group } = this.getRewardFromVoteCount(this.getVotesByClient(client).length)
       if (group === -1) return
       return this.whiteListGroup(
         client,
@@ -196,7 +233,7 @@ registerPlugin<{
      * @param whitelisted whitelisted groups
      */
     private whiteListGroup(client: Client, groups: (number|string)[], whitelisted: (number|string)[]) {
-      let assign = groups.map(g => String(g))
+      const assign = groups.map(g => String(g))
       const remove = whitelisted.map(w => String(w)).filter(w => !assign.includes(w))
       client.getServerGroups().forEach(group => {
         if (remove.includes(group.id())) {
@@ -213,16 +250,14 @@ registerPlugin<{
      * retrieves the servergroup the amount of counts should get
      * @param votes the amount of votes to retrieve the group
      */
-    getGroupFromVoteCount(votes: number) {
-      let g = rewardSorted.find(g => g.amount <= votes)
-      if (!g) {
-        if (rewardSorted.length === 0 || rewardSorted[0].amount > votes) {
-          g = { amount: -1, group: -1 }
-        } else {
-          g = rewardSorted[rewardSorted.length - 1]
-        }
+    getRewardFromVoteCount(votes: number): Reward {
+      const reward = rewardSorted.find(g => g.amount <= votes)
+      if (reward) return reward
+      if (rewardSorted.length === 0 || rewardSorted[0].amount > votes) {
+        return { group: -1, amount: -1, coins: 0 }
+      } else {
+        return rewardSorted[rewardSorted.length - 1]
       }
-      return g.group
     }
 
     /**
@@ -301,11 +336,12 @@ registerPlugin<{
   class TeamSpeakServers extends Vote {
 
     protected namespace = "teamspeakServersDotOrg_"
+    protected service = "TeamSpeak-Servers.org"
     private apikey: string
     private sid: string
 
-    constructor({ key, sid, createCommand }: { key: string, sid: string, createCommand: (cmd: string) => Command}) {
-      super()
+    constructor({ key, sid, createCommand, eco }: { key: string, sid: string, createCommand: (cmd: string) => Command, eco: any}) {
+      super({ eco })
       this.apikey = key
       this.sid = sid
       this.registerCommand(createCommand)
@@ -327,6 +363,10 @@ registerPlugin<{
             reply(`You have have voted ${this.getVotesByClient(client).length} times!`)
           } else {
             reply(`You have have voted ${this.getVotesByClient(client).length} times in the last ${removeTime} days!`)
+          }
+          if (multiconomy) {
+            const votes = this.getVotesByClient(client).length + 1
+            reply(`You get rewarded ${this.getRewardFromVoteCount(votes).coins}${this.eco.getCurrencySign()} for your next vote!`)
           }
         })
     }
@@ -380,14 +420,26 @@ registerPlugin<{
     initialized = false
   })  
 
+  //action for when a client connects
   event.on("clientMove", ({fromChannel, client}) => {
     if (fromChannel || client.isSelf()) return
     votings.forEach(v => v.checkClient(client))
   })
   
+  //action for when a client changes its nickname
   event.on("clientNick", client => votings.forEach(v => v.checkClient(client)))
-  event.on("serverGroupAdded", ev => votings.forEach(v => v.checkClient(ev.client)))
-  event.on("serverGroupRemoved", ev => votings.forEach(v => v.checkClient(ev.client)))
+
+  //action for when a client gets removed from a servergroup
+  event.on("serverGroupAdded", ev => {
+    if (ev.invoker.isSelf()) return
+    votings.forEach(v => v.checkClient(ev.client))
+  })
+  
+  //action for when a client gets added to a servergroup
+  event.on("serverGroupRemoved", ev => {
+    if (ev.invoker.isSelf()) return
+    votings.forEach(v => v.checkClient(ev.client))
+  })
 
   setInterval(() => {
     if (!backend.isConnected()) return
@@ -396,9 +448,17 @@ registerPlugin<{
 
   event.on("load", () => {
 
+    let eco: any = null
+
+    if (multiconomy) {
+      eco = require("MultiConomy")
+      if (!eco) throw new Error("MultiConomy.js not found! Please be sure to install and enable MultiConomy.js")
+    }
+
     const command = require("command")
     const { createCommand } = command
-    votings.push(new TeamSpeakServers({ key, sid, createCommand }))
+
+    votings.push(new TeamSpeakServers({ key, sid, createCommand, eco }))
 
     if (backend.isConnected()) {
       initialized = true
