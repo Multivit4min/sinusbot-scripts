@@ -117,7 +117,6 @@ registerPlugin<{
 
     /** initializes store */
     protected init() {
-      this.setVotes([])
       if (!Array.isArray(this.getVotes())) this.setVotes([])
     }
 
