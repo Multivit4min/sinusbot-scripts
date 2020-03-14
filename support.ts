@@ -3,11 +3,6 @@
 import type { Client } from "sinusbot/typings/interfaces/Client"
 import type { Command } from "sinusbot/typings/external/command"
 
-interface Config {
-  supportChannel: string
-  command: string
-  roles: SupportRoles
-}
 
 type SupportRoles = SupportRole[]
 interface SupportRole {
@@ -15,12 +10,6 @@ interface SupportRole {
   permBlacklist: boolean
   jurisdiction: string
   description: string
-}
-
-
-enum SupportRequestResponse {
-  OK,
-  BLACKLISTED
 }
 
 
@@ -66,23 +55,27 @@ interface StorageProvider {
   removeBlacklist(uid: string): Promise<void>
 }
 
-registerPlugin<Config>({
+registerPlugin<{
+  supportChannel: string
+  command: string
+  roles: SupportRoles
+  DEBUGLEVEL: number
+}>({
   name: "Support",
   engine: ">= 1.0.0",
   version: "1.0.0",
   description: "Script for Support Requests on TeamSpeak Servers",
   author: "Multivitamin <david.kartnaller@gmail.com",
-  requiredModules: ["http"],
   vars: [{
     type: "channel" as const,
     name: "supportChannel",
-    title: "TeamSpeak-Servers API Key",
+    title: "Support Channel",
     default: "-1"
   }, {
     type: "string" as const,
     name: "command",
-    title: "TeamSpeak-Servers API Key",
-    default: "-1"
+    title: "Chat Command name (default: support)",
+    default: "support"
   }, {
     type: "array" as const,
     name: "roles",
@@ -109,9 +102,42 @@ registerPlugin<Config>({
       default: "NO_DESCRIPTION_GIVEN"
     }],
     default: []
+  }, {
+    name: "DEBUGLEVEL",
+    title: "Debug Messages (default is INFO)",
+    type: "select",
+    options: ["ERROR", "WARNING", "INFO", "VERBOSE"],
+    default: "2"
   }]
 }, (_, config) => {
   
+  
+  enum LOGLEVEL {
+    ERROR = "ERROR",
+    WARNING = "WARNING",
+    INFO = "INFO",
+    VERBOSE = "VERBOSE"
+  }
+
+  enum SupportRequestResponse {
+    OK,
+    BLACKLISTED
+  }
+
+  /** @param level current debug level */
+  function DEBUG(level: LOGLEVEL) {
+    /**
+     * @param mode the loglevel the message should be logged with
+     * @param args data to log
+     */
+    const logger = (mode: LOGLEVEL, ...args: any[]) => {
+      if (mode > level) return
+      console.log(`[${mode}]`, ...args)
+    }
+    return (mode: LOGLEVEL) => logger.bind(null, mode)
+  }
+
+  const debug = DEBUG([LOGLEVEL.ERROR, LOGLEVEL.WARNING, LOGLEVEL.INFO, LOGLEVEL.VERBOSE][config.DEBUGLEVEL])
 
   class BaseStore implements StorageProvider {
 
@@ -183,6 +209,7 @@ registerPlugin<Config>({
 
     readonly roles: SupportRoles
     readonly backend = require("backend")
+    readonly format = require("format")
     readonly cmd: Command.CommandGroup
     private readonly store: StorageProvider
     private readonly queue: SupportQueue = []
@@ -221,8 +248,10 @@ registerPlugin<Config>({
      */
     async setup(namespace: string) {
       await this.store.setup(namespace)
+      this.cmd.help("manage support requests")
       this.cmd
         .addCommand("request")
+        .help("requests a supporter")
         .checkPermission(client => this.clientInChallengeState(client, RequestChallengeState.ASK_INQUIRY))
         .addArgument(args => args.number.setName("inquiry").integer().max(this.roles.length - 1).min(0))
         .exec((client, args) => {
@@ -232,6 +261,7 @@ registerPlugin<Config>({
         })
       this.cmd
         .addCommand("describe")
+        .help("describes your support issue")
         .checkPermission(client => this.clientInChallengeState(client, RequestChallengeState.DESCRIBE))
         .addArgument(args => args.rest.setName("issue"))
         .exec((client, args) => {
@@ -505,14 +535,17 @@ registerPlugin<Config>({
 
     private checkInquiry() {
       this.client.chat(`What inquiry do you have?`)
+      let res = ""
       this.parent.roles.forEach((role, index) => {
-        const res = `\n${this.parent.cmd.getFullCommandName()} support ${index}\n${role.jurisdiction} - ${role.description}`
-        this.client.chat(res)
+        const cmd = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} request ${index}`)
+        res += `\n${cmd}\n${role.jurisdiction} - ${role.description}\n`
       })
+      this.client.chat(res)
     }
 
     private describeIssue() {
-      this.client.chat(`\nPlease describe your issue, use the following command:\n${this.parent.cmd.getFullCommandName()} describe YOUR_DESCRIPTION_HERE`)
+      const describe = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} describe YOUR_DESCRIPTION_HERE`)
+      this.client.chat(`\nPlease describe your issue, use the following command:\n${describe}`)
     }
 
     private complete() {
@@ -544,12 +577,13 @@ registerPlugin<Config>({
   const engine = require("engine")
 
   if (config.roles.length === 0) {
-    engine.log("No supporter roles in your config defined!")
-    engine.log("Please setup your script first!")
+    debug(LOGLEVEL.ERROR)("No supporter roles in your config defined!")
+    debug(LOGLEVEL.ERROR)("Please setup your script first!")
     return
   }
 
   event.on("load", async () => {
+    debug(LOGLEVEL.VERBOSE)("support script initializing...")
   
     const support = new Support({
       roles: config.roles,
@@ -562,16 +596,19 @@ registerPlugin<Config>({
     event.on("clientMove", async ({ client, toChannel, invoker }) => {
       if (!toChannel || toChannel.id() !== config.supportChannel) return
       if (support.isSupporter(client)) {
+        debug(LOGLEVEL.VERBOSE)("ignoring move event because client is supporter")
         //is supporter
       } else {
-        if (!client.equals(invoker)) return //do nothing someone moved him inside
-        switch (await support.requestSupport(invoker)) {
+        if (invoker && !client.equals(invoker)) return //do nothing someone moved him inside
+        switch (await support.requestSupport(client)) {
           case SupportRequestResponse.BLACKLISTED:
+            debug(LOGLEVEL.VERBOSE)(`removing ${client.getURL()} because of blacklist`)
             const { reason } = await support.getBlacklistEntry(client)
             client.chat(`You are blacklisted from support! (reason: ${reason})`)
             return client.kickFromChannel()
 
           case SupportRequestResponse.OK:
+            debug(LOGLEVEL.VERBOSE)(`got support request ok for ${client.getURL()}`)
             return //all ok
         }
       }

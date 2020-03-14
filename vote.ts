@@ -339,7 +339,7 @@ registerPlugin<{
     private apikey: string
     private sid: string
 
-    constructor({ key, sid, createCommand, eco }: { key: string, sid: string, createCommand: (cmd: string) => Command, eco: any}) {
+    constructor({ key, sid, createCommand, eco }: { key: string, sid: string, createCommand: (cmd: string) => Command.Command, eco: any}) {
       super({ eco })
       this.apikey = key
       this.sid = sid
@@ -350,7 +350,7 @@ registerPlugin<{
     /**
      * registers the voting command
      */
-    private registerCommand(createCommand: (cmd: string) => Command) {
+    private registerCommand(createCommand: (cmd: string) => Command.Command) {
       createCommand("vote")
         .help("retrieves the vote link from teamspeak-servers.org")
         .manual("retrieves the vote link for teamspeak-servers.org")
