@@ -8,7 +8,7 @@ type SupportRoles = SupportRole[]
 interface SupportRole {
   sgid: string[]
   permBlacklist: boolean
-  jurisdiction: string
+  department: string
   description: string
 }
 
@@ -55,12 +55,17 @@ interface StorageProvider {
   removeBlacklist(uid: string): Promise<void>
 }
 
-registerPlugin<{
+interface Configuration {
   supportChannel: string
   command: string
+  useDynamicChannelName: string
+  channelNameOnline: string
+  channelNameOffline: string
   roles: SupportRoles
   DEBUGLEVEL: number
-}>({
+}
+
+registerPlugin<Configuration>({
   name: "Support",
   engine: ">= 1.0.0",
   version: "1.0.0",
@@ -74,8 +79,32 @@ registerPlugin<{
   }, {
     type: "string" as const,
     name: "command",
-    title: "Chat Command name (default: support)",
+    title: "chat command name (default: support)",
     default: "support"
+  }, {
+    type: "select" as const,
+    name: "useDynamicChannelName",
+    title: "use dynamic support channel name?",
+    options: ["No", "Yes"],
+    default: "0"
+  }, {
+    type: "string" as const,
+    name: "channelNameOnline",
+    title: "channel name when minimum 1 supporter is online (placeholders: %count% - amount of supporters online)",
+    default: "Support %count% online",
+    conditions: [{
+      field: "useDynamicChannelName",
+      value: "1"
+    }]
+  }, {
+    type: "string" as const,
+    name: "channelNameOffline",
+    title: "channel name when no supporter is online",
+    default: "Support offline",
+    conditions: [{
+      field: "useDynamicChannelName",
+      value: "1"
+    }]
   }, {
     type: "array" as const,
     name: "roles",
@@ -92,9 +121,9 @@ registerPlugin<{
       default: false
     }, {
       type: "string" as const,
-      title: "jurisdiction of this role",
-      name: "jurisdiction",
-      default: "NO_JURISDICTION_GIVEN"
+      title: "department of this role",
+      name: "department",
+      default: "NO_department_GIVEN"
     }, {
       type: "string" as const,
       title: "description of this role",
@@ -110,8 +139,7 @@ registerPlugin<{
     default: "2"
   }]
 }, (_, config) => {
-  
-  
+
   enum LOGLEVEL {
     ERROR = "ERROR",
     WARNING = "WARNING",
@@ -123,6 +151,8 @@ registerPlugin<{
     OK,
     BLACKLISTED
   }
+
+  const MAX_CHANNEL_NAME_LENGTH = 40
 
   /** @param level current debug level */
   function DEBUG(level: LOGLEVEL) {
@@ -197,28 +227,24 @@ registerPlugin<{
 
 
   
-  interface SupportConfig {
-    roles: SupportRoles
+  interface SupportConfig extends Configuration {
     storage: StorageProvider
-    cmd: string
   }
 
   type SupportQueue = Queue[]
 
   class Support {
 
-    readonly roles: SupportRoles
+    readonly config: SupportConfig
     readonly backend = require("backend")
     readonly format = require("format")
     readonly cmd: Command.CommandGroup
-    private readonly store: StorageProvider
     private readonly queue: SupportQueue = []
     private readonly pendingRequest: RequestChallenge[] = []
 
     constructor(config: SupportConfig) {
-      this.roles = config.roles
-      this.store = config.storage
-      let { cmd } = config
+      this.config = config
+      let cmd = config.command
       if (typeof cmd !== "string" || cmd.length < 1 || (/\s/).test(cmd)) {
         engine.log(`Invalid command name provided '${cmd}' using fallback name "sup"`)
         cmd = "support"
@@ -226,6 +252,13 @@ registerPlugin<{
       this.cmd = require("command").createCommandGroup(cmd)
     }
 
+    get roles() {
+      return this.config.roles
+    }
+
+    get store() {
+      return this.config.storage
+    }
 
     /**
      * checks wether a client is blacklisted or not
@@ -253,7 +286,7 @@ registerPlugin<{
         .addCommand("request")
         .help("requests a supporter")
         .checkPermission(client => this.clientInChallengeState(client, RequestChallengeState.ASK_INQUIRY))
-        .addArgument(args => args.number.setName("inquiry").integer().max(this.roles.length - 1).min(0))
+        .addArgument(args => args.number.setName("inquiry").integer().max(this.config.roles.length - 1).min(0))
         .exec((client, args) => {
           const challenge = this.clientGetChallenge(client)
           if (!challenge) return client.chat("Whooops something went wrong! (Challenge not found)")
@@ -292,38 +325,37 @@ registerPlugin<{
 
     /**
      * retrieves a list of clients which are supporters and online
-     * @param jurisdiction requested jurisdiction
+     * @param department requested department
      */
-    getOnlineSupporters(jurisdiction?: string) {
+    getOnlineSupporters(department?: string) {
       return this.backend.getClients()
-        .filter(client => this.isSupporter(client, jurisdiction))
+        .filter(client => this.isSupporter(client, department))
         .map(client => ({
           client,
           roles: this.getClientSupportRoles(client)
         }))
     }
 
-
     /**
      * retrieves support roles of a specific Client
      * @param client the client to check
-     * @param jurisdiction the jurisdiction to get
+     * @param department the department to get
      */
-    getClientSupportRoles(client: Client, jurisdiction?: string): SupportRoles {
+    getClientSupportRoles(client: Client, department?: string): SupportRoles {
       const roles = this.roles
         .filter(role => this.inGroup(client, role.sgid))
-      if (!jurisdiction) return roles
-      return roles.filter(role => role.jurisdiction === jurisdiction)
+      if (!department) return roles
+      return roles.filter(role => role.department === department)
     }
 
     /**
      * checks wether a client is in a support group
-     * of the requested jurisdiction
+     * of the requested department
      * @param client the client which should be checked
-     * @param jurisdiction the jurisdiction he should be in
+     * @param department the department he should be in
      */
-    isSupporter(client: Client, jurisdiction?: string) {
-      return this.getClientSupportRoles(client, jurisdiction).length > 0
+    isSupporter(client: Client, department?: string) {
+      return this.getClientSupportRoles(client, department).length > 0
     }
   
     /**
@@ -335,6 +367,10 @@ registerPlugin<{
       return client.getServerGroups().map(g => g.id()).some(sgid => groups.includes(sgid))
     }
 
+    /**
+     * completes the request challenge and returns the result
+     * @param challenge 
+     */
     private getChallengeComplete(challenge: RequestChallenge) {
       this.queue.push(new Queue({
         uid: challenge.client.uid(),
@@ -359,6 +395,35 @@ registerPlugin<{
       this.pendingRequest.push(challenge)
       challenge.challenge()
       return SupportRequestResponse.OK
+    }
+
+    /**
+     * retrieves the sinusbot support channel object
+     */
+    private getSupportChannel() {
+      const channel = this.backend.getChannelByID(this.config.supportChannel)
+      if (!channel) throw new Error(`Could not find the support channel with id ${this.config.supportChannel}`)
+      return channel
+    }
+
+    /**
+     * gets called when sinusbot connects to a server
+     */
+    onConnect() {
+      this.supportCountChange()
+    }
+
+    /**
+     * handles support count change
+     */
+    supportCountChange() {
+      if (this.config.useDynamicChannelName === "0") return
+      const count = this.getOnlineSupporters().length
+      debug(LOGLEVEL.VERBOSE)(`Support count changed! (${count})`)
+      const name = count === 0 ? this.config.channelNameOffline : this.config.channelNameOnline.replace("%count%", String(count))
+      if (name.length > MAX_CHANNEL_NAME_LENGTH) throw new Error(`Support Channel name length exceeds limit of ${MAX_CHANNEL_NAME_LENGTH} characters! (${name})`)
+      const channel = this.getSupportChannel()
+      if (channel.name() !== name) channel.setName(name)
     }
   }
 
@@ -432,7 +497,7 @@ registerPlugin<{
      * gets a list of available supporters for this case
      */
     supporters() {
-      return this.parent.getOnlineSupporters(this.role.jurisdiction)
+      return this.parent.getOnlineSupporters(this.role.department)
     }
   }
 
@@ -538,7 +603,7 @@ registerPlugin<{
       let res = ""
       this.parent.roles.forEach((role, index) => {
         const cmd = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} request ${index}`)
-        res += `\n${cmd}\n${role.jurisdiction} - ${role.description}\n`
+        res += `\n${cmd}\n${role.department} - ${role.description}\n`
       })
       this.client.chat(res)
     }
@@ -582,18 +647,23 @@ registerPlugin<{
     return
   }
 
+
   event.on("load", async () => {
     debug(LOGLEVEL.VERBOSE)("support script initializing...")
   
     const support = new Support({
-      roles: config.roles,
       storage: new BaseStore(),
-      cmd: config.command
+      ...config
     })   
     await support.setup("")
   
+    if (support.backend.isConnected()) support.onConnect()
+    event.on("connect", () => setTimeout(() => support.onConnect(), 2000))
   
-    event.on("clientMove", async ({ client, toChannel, invoker }) => {
+    event.on("clientMove", async ({ client, toChannel, fromChannel, invoker }) => {
+      if (!toChannel || !fromChannel) {
+        if (support.isSupporter(client)) support.supportCountChange()
+      }
       if (!toChannel || toChannel.id() !== config.supportChannel) return
       if (support.isSupporter(client)) {
         debug(LOGLEVEL.VERBOSE)("ignoring move event because client is supporter")
