@@ -491,6 +491,7 @@ registerPlugin<Configuration>({
      * @param challenge 
      */
     private getChallengeComplete(challenge: RequestChallenge) {
+      this.pendingRequest.slice(this.pendingRequest.indexOf(challenge), 1)
       const queue = new Queue({
         uid: challenge.client.uid(),
         nick: challenge.client.nick(),
