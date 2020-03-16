@@ -6,6 +6,7 @@ import type { Command } from "sinusbot/typings/external/command"
 
 type SupportRoles = SupportRole[]
 interface SupportRole {
+  cid: string
   sgid: string[]
   permBlacklist: boolean
   department: string
@@ -115,6 +116,11 @@ registerPlugin<Configuration>({
       name: "sgid",
       default: []
     }, {
+      type: "channel" as const,
+      title: "Support Channel for this group",
+      name: "cid",
+      default: "-1"
+    }, {
       type: "checkbox" as const,
       title: "allow support blacklist?",
       name: "permBlacklist",
@@ -168,6 +174,63 @@ registerPlugin<Configuration>({
   }
 
   const debug = DEBUG([LOGLEVEL.ERROR, LOGLEVEL.WARNING, LOGLEVEL.INFO, LOGLEVEL.VERBOSE][config.DEBUGLEVEL])
+
+
+
+  class Role {
+
+    private cid: string
+    private sgid: string[]
+    private perms: Record<string, boolean> = {}
+    private backend = require("backend")
+    readonly department: string
+    readonly description: string
+
+    constructor(role: SupportRole) {
+      this.cid = role.cid
+      this.sgid = role.sgid
+      this.department = role.department
+      this.description = role.description
+      this.setPerm("blacklist", role.permBlacklist)
+    }
+
+    /**
+     * retrieves the channel
+     */
+    getChannel() {
+      const channel = this.backend.getChannelByID(this.cid)
+      if (!channel) throw new Error(`could not get channel with id '${this.cid}' for role '${this.department}'`)
+      return channel
+    }
+
+    /**
+     * checks if the client is in this role
+     * @param client client to check
+     */
+    hasRole(client: Client) {
+      return client.getServerGroups().map(g => g.id()).some(sgid => this.sgid.includes(sgid))
+    }
+
+    /**
+     * sets a permission
+     * @param name the permission name to set
+     * @param value the value to set
+     */
+    private setPerm(name: string, value: boolean = false) {
+      this.perms[name] = value
+      return this
+    }
+
+    /**
+     * gets a specific permission
+     * @param name the permission name to retrieve
+     */
+    getPerm(name: string) {
+      return Boolean(this.perms[name])
+    }
+  }
+
+
 
   class BaseStore implements StorageProvider {
 
@@ -226,9 +289,14 @@ registerPlugin<Configuration>({
 
 
 
-  
-  interface SupportConfig extends Configuration {
+  interface SupportConfig {
     storage: StorageProvider
+    supportChannel: string
+    command: string
+    useDynamicChannelName: string
+    channelNameOnline: string
+    channelNameOffline: string
+    roles: Role[]
   }
 
   type SupportQueue = Queue[]
@@ -241,7 +309,7 @@ registerPlugin<Configuration>({
     readonly cmd: Command.CommandGroup
     private readonly queue: SupportQueue = []
     private readonly pendingRequest: RequestChallenge[] = []
-    private readonly challengeQueue: { [uid: string]: ChallengeQueue<any> } = {}
+    private readonly challengeQueue: { [uid: string]: ChallengeQueue<SupportResponseChallenge> } = {}
 
     constructor(config: SupportConfig) {
       this.config = config
@@ -315,13 +383,21 @@ registerPlugin<Configuration>({
         })
       this.cmd
         .addCommand("accept")
-        .help("accepts the request")
-        .checkPermission(client => this.clientInRequestChallengeState(client, RequestChallengeState.DESCRIBE_ISSUE))
-        .addArgument(args => args.rest.setName("issue"))
-        .exec((client, args) => {
-          const challenge = this.clientGetChallenge(client)
-          if (!challenge) return client.chat("Whooops something went wrong! (Challenge not found)")
-          challenge.setIssue(args.issue)
+        .help("accepts a request")
+        .checkPermission(client => this.clientInChallengeQueueState(client, SupportResponseChallengeState.REQUEST))
+        .exec(client => {
+          const queue = this.clientGetChallengeQueue(client)
+          if (!queue || !queue.active) return client.chat("Whooops something went wrong! (Queue not found or not active)")
+          queue.active.accept()
+        })
+      this.cmd
+        .addCommand("decline")
+        .help("declines a request")
+        .checkPermission(client => this.clientInChallengeQueueState(client, SupportResponseChallengeState.REQUEST))
+        .exec(client => {
+          const queue = this.clientGetChallengeQueue(client)
+          if (!queue || !queue.active) return client.chat("Whooops something went wrong! (Queue not found or not active)")
+          queue.active.decline()
         })
     }
 
@@ -330,10 +406,11 @@ registerPlugin<Configuration>({
      * @param uid client uid
      * @param item item to add
      */
-    addChallengeQueue(uid: string, item: Challenge<any>) {
+    addChallengeQueue(uid: string, item: SupportResponseChallenge) {
       if (!(this.challengeQueue[uid] instanceof ChallengeQueue))
         this.challengeQueue[uid] = new ChallengeQueue()
       this.challengeQueue[uid].add(item)
+      item.challengeQueue = this.challengeQueue[uid]
       return this
     }
 
@@ -342,7 +419,7 @@ registerPlugin<Configuration>({
      * @param client the client to retrieve the state for
      */
     clientGetChallenge(client: Client) {
-      return this.pendingRequest.find(req => client.equals(req.client))
+      return this.pendingRequest.find(req => client.uid() === req.client.uid())
     }
 
     /**
@@ -354,6 +431,25 @@ registerPlugin<Configuration>({
       const challenge = this.clientGetChallenge(client)
       if (!challenge) return false
       return challenge.state === state
+    }
+
+    /**
+     * retrieves a queue class for the client or undefined if none active
+     * @param client client to request the queue from
+     */
+    clientGetChallengeQueue(client: Client) {
+      return this.challengeQueue[client.uid()]
+    }
+
+    /**
+     * checks if a client is in a specific challenge state
+     * @param client client to check the challenge state
+     * @param state checks if the client is in this state
+     */
+    clientInChallengeQueueState(client: Client, state: SupportResponseChallengeState) {
+      const queue = this.clientGetChallengeQueue(client)
+      if (!queue || !queue.active) return false
+      return queue.active.state === state
     }
 
     /**
@@ -374,9 +470,8 @@ registerPlugin<Configuration>({
      * @param client the client to check
      * @param department the department to get
      */
-    getClientSupportRoles(client: Client, department?: string): SupportRoles {
-      const roles = this.roles
-        .filter(role => this.inGroup(client, role.sgid))
+    getClientSupportRoles(client: Client, department?: string): Role[] {
+      const roles = this.roles.filter(role => role.hasRole(client))
       if (!department) return roles
       return roles.filter(role => role.department === department)
     }
@@ -390,28 +485,27 @@ registerPlugin<Configuration>({
     isSupporter(client: Client, department?: string) {
       return this.getClientSupportRoles(client, department).length > 0
     }
-  
-    /**
-     * checks if the client is in one of the groups
-     * @param client the client to check
-     * @param groups the groups which should be checked
-     */
-    private inGroup(client: Client, groups: string[]) {
-      return client.getServerGroups().map(g => g.id()).some(sgid => groups.includes(sgid))
-    }
 
     /**
      * completes the request challenge and returns the result
      * @param challenge 
      */
     private getChallengeComplete(challenge: RequestChallenge) {
-      this.queue.push(new Queue({
+      const queue = new Queue({
         uid: challenge.client.uid(),
         nick: challenge.client.nick(),
-        issue: <string>challenge.result.issue,
-        role: <SupportRole>challenge.result.role,
+        issue: challenge.result.issue!,
+        role: challenge.result.role!,
         support: this
-      }))
+      })
+      this.queue.push(queue)
+      this.getOnlineSupporters(challenge.result.role!.department)
+        .forEach(({ client }) => {
+          const challenge = new SupportResponseChallenge({
+            support: this, queue, uid: client.uid()
+          })
+          this.addChallengeQueue(client.uid(), challenge)
+        })
     }
 
     /**
@@ -465,7 +559,7 @@ registerPlugin<Configuration>({
   interface QueueConfig {
     uid: string
     nick: string
-    role: SupportRole
+    role: Role
     issue: string
     support: Support
   }
@@ -475,7 +569,7 @@ registerPlugin<Configuration>({
 
     private uid: string
     private nick: string
-    private role: SupportRole
+    readonly role: Role
     readonly issue: string
     private parent: Support
 
@@ -618,7 +712,7 @@ registerPlugin<Configuration>({
   }
 
   interface RequestChallengeResult {
-    role: SupportRole
+    role: Role
     issue: string
   }
 
@@ -650,8 +744,8 @@ registerPlugin<Configuration>({
       let res = ""
       this.parent.roles.forEach((role, index) => {
         const cmd = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} request ${index}`)
-        res += `\n${cmd}\n${role.department} - ${role.description}\n`
-        res += `\n${this.parent.getOnlineSupporters(role.department)} online`
+        res += `\n${cmd}\n${role.department} - ${role.description}`
+        res += `\n${this.parent.getOnlineSupporters(role.department).length} online\n`
       })
       this.client.chat(res)
     }
@@ -695,7 +789,7 @@ registerPlugin<Configuration>({
     WAITING,
     REQUEST,
     ACCEPT,
-    DENY,
+    DECLINE,
     TIMEOUT,
     COMPLETE,
     UNRESOLVED
@@ -705,6 +799,7 @@ registerPlugin<Configuration>({
 
     private parent: Support
     private queue: Queue
+    challengeQueue?: ChallengeQueue<any>
     private uid: string
 
     constructor(config: SupportResponseChallengeConfig) {
@@ -713,6 +808,7 @@ registerPlugin<Configuration>({
       this.queue = config.queue
       this.uid = config.uid
       this.setCallback(SupportResponseChallengeState.REQUEST, this.request.bind(this))
+      this.setCallback(SupportResponseChallengeState.ACCEPT, this.accepted.bind(this))
     }
 
     start() {
@@ -720,16 +816,34 @@ registerPlugin<Configuration>({
     }
 
     private request() {
-      let request = `\nNew support request from ${this.queue.getClient().getURL()} with Issue:\n${this.queue.issue}\n`
-      const accept = this.parent.format.bold(`${this.parent.cmd.getCommandName()} accept`)
-      const decline = this.parent.format.bold(`${this.parent.cmd.getCommandName()} decline`)
-      request += `Use ${accept} to accept the support request`
-      request += `Use ${decline} to decline the support request`
+      const client = this.queue.getClient()
+      let request = `\nNew support request from [URL=${client.getURL()}]${client.name()}[/URL] with issue:\n${this.parent.format.italic(this.queue.issue)}\n`
+      const accept = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} accept`)
+      const decline = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} decline`)
+      request += `\nUse ${accept} to accept the support request`
+      request += `\nUse ${decline} to decline the support request`
       this.getSupporterClient().chat(request)
     }
 
     private getSupporterClient() {
       return this.parent.getClient(this.uid)
+    }
+
+    private accepted() {
+      const supporter = this.getSupporterClient()
+      const client = this.queue.getClient()
+      const channel = this.queue.role.getChannel()
+      supporter.moveTo(channel)
+      client.moveTo(channel)
+    }
+
+    accept() {
+      this.nextState(SupportResponseChallengeState.ACCEPT)
+    }
+
+    decline() {
+      this.nextState(SupportResponseChallengeState.DECLINE)
+      if (this.challengeQueue) this.challengeQueue.stopActive()
     }
   }
 
@@ -741,7 +855,7 @@ registerPlugin<Configuration>({
 
   class ChallengeQueue<T extends Challenge<any>> {
 
-    private active?: ChallengeQueueItem<T>
+    active?: ChallengeQueueItem<T>
     readonly challenges: ChallengeQueueItem<T>[] = []
 
     /**
@@ -751,6 +865,15 @@ registerPlugin<Configuration>({
     add(item: ChallengeQueueItem<T>) {
       this.challenges.push(item)
       if (!this.active) this.next()
+    }
+
+    /**
+     * stops the currently active element
+     * and starts the next in queue
+     */
+    stopActive() {
+      this.active = undefined
+      this.next()
     }
 
     /**
@@ -782,7 +905,12 @@ registerPlugin<Configuration>({
   
     const support = new Support({
       storage: new BaseStore(),
-      ...config
+      useDynamicChannelName: config.useDynamicChannelName,
+      channelNameOffline: config.channelNameOffline,
+      channelNameOnline: config.channelNameOnline,
+      supportChannel: config.supportChannel,
+      roles: config.roles.map(role => new Role(role)),
+      command: config.command
     })   
     await support.setup("")
   
