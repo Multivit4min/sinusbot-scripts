@@ -241,6 +241,7 @@ registerPlugin<Configuration>({
     readonly cmd: Command.CommandGroup
     private readonly queue: SupportQueue = []
     private readonly pendingRequest: RequestChallenge[] = []
+    private readonly challengeQueue: { [uid: string]: ChallengeQueue<any> } = {}
 
     constructor(config: SupportConfig) {
       this.config = config
@@ -258,6 +259,16 @@ registerPlugin<Configuration>({
 
     get store() {
       return this.config.storage
+    }
+
+    /**
+     * retrieves the client by its id, otherwise throws an error
+     * @param uid the uid of the client to retrieve
+     */
+    getClient(uid: string) {
+      const client = this.backend.getClients().find(c => c.uid() === uid)
+      if (!client) throw new Error(`Client with uid ${uid} not found!`)
+      return client
     }
 
     /**
@@ -285,7 +296,7 @@ registerPlugin<Configuration>({
       this.cmd
         .addCommand("request")
         .help("requests a supporter")
-        .checkPermission(client => this.clientInChallengeState(client, RequestChallengeState.ASK_INQUIRY))
+        .checkPermission(client => this.clientInRequestChallengeState(client, RequestChallengeState.ASK_INQUIRY))
         .addArgument(args => args.number.setName("inquiry").integer().max(this.config.roles.length - 1).min(0))
         .exec((client, args) => {
           const challenge = this.clientGetChallenge(client)
@@ -295,13 +306,35 @@ registerPlugin<Configuration>({
       this.cmd
         .addCommand("describe")
         .help("describes your support issue")
-        .checkPermission(client => this.clientInChallengeState(client, RequestChallengeState.DESCRIBE))
+        .checkPermission(client => this.clientInRequestChallengeState(client, RequestChallengeState.DESCRIBE_ISSUE))
         .addArgument(args => args.rest.setName("issue"))
         .exec((client, args) => {
           const challenge = this.clientGetChallenge(client)
           if (!challenge) return client.chat("Whooops something went wrong! (Challenge not found)")
           challenge.setIssue(args.issue)
         })
+      this.cmd
+        .addCommand("accept")
+        .help("accepts the request")
+        .checkPermission(client => this.clientInRequestChallengeState(client, RequestChallengeState.DESCRIBE_ISSUE))
+        .addArgument(args => args.rest.setName("issue"))
+        .exec((client, args) => {
+          const challenge = this.clientGetChallenge(client)
+          if (!challenge) return client.chat("Whooops something went wrong! (Challenge not found)")
+          challenge.setIssue(args.issue)
+        })
+    }
+
+    /**
+     * adds a new item to the challenge queu
+     * @param uid client uid
+     * @param item item to add
+     */
+    addChallengeQueue(uid: string, item: Challenge<any>) {
+      if (!(this.challengeQueue[uid] instanceof ChallengeQueue))
+        this.challengeQueue[uid] = new ChallengeQueue()
+      this.challengeQueue[uid].add(item)
+      return this
     }
 
     /**
@@ -317,7 +350,7 @@ registerPlugin<Configuration>({
      * @param client the client to check
      * @param state the state to check if he is in
      */
-    clientInChallengeState(client: Client, state: RequestChallengeState) {
+    clientInRequestChallengeState(client: Client, state: RequestChallengeState) {
       const challenge = this.clientGetChallenge(client)
       if (!challenge) return false
       return challenge.state === state
@@ -428,6 +461,7 @@ registerPlugin<Configuration>({
   }
 
 
+
   interface QueueConfig {
     uid: string
     nick: string
@@ -442,7 +476,7 @@ registerPlugin<Configuration>({
     private uid: string
     private nick: string
     private role: SupportRole
-    private issue: string
+    readonly issue: string
     private parent: Support
 
     constructor(config: QueueConfig) {
@@ -482,15 +516,15 @@ registerPlugin<Configuration>({
      * checks if the client is online
      */
     isOnline() {
-      return Boolean(this.findClient())
+      try {
+        return Boolean(this.getClient())
+      } catch (e) {
+        return false
+      }
     }
 
-    /**
-     * gets the client object if the given client is online
-     */
-    findClient() {
-      return this.parent.backend.getClients()
-        .find(client => client.uid() === this.uid)
+    getClient() {
+      return this.parent.getClient(this.uid)
     }
 
     /**
@@ -502,10 +536,12 @@ registerPlugin<Configuration>({
   }
 
 
+
+
   abstract class Challenge<T extends number> {
 
     private stateObservers: ((event: {from: T, to: T }) => void)[] = []
-    private cbs: (() => void)[] = []
+    private cbs: Record<number, () => void> = []
     private challengeState: T
 
     /**
@@ -533,23 +569,36 @@ registerPlugin<Configuration>({
      * changes the state and emits to observers
      * @param to the new state
      */
-    private setState(state: number) {
+    private setState(to: T) {
       const from = this.challengeState
-      this.challengeState = <T>state
-      this.stateObservers.forEach(cb => cb({ from, to: <T>state }))
+      this.challengeState = to
+      this.stateObservers.forEach(cb => cb({ from, to }))
     }
 
     /**
      * sets the callbacks which are being executed in order
      * @param cbs 
      */
-    protected setCallbacks(cbs: (() => void)[]) {
-      this.cbs = cbs
+    protected setCallback(index: T, cb: () => void) {
+      this.cbs[index] = cb
+      return this
     }
-  
-    /* runs the next available challenge */
-    protected next() {
-      this.setState(this.challengeState + 1)
+
+    /**
+     * retrieves a callback by its index
+     * @param index the index to get
+     */
+    private getCallback(index: T): () => void {
+      if (typeof this.cbs[index] === "function") return this.cbs[index]
+      return () => null
+    }
+
+    /**
+     * runs the next available challenge
+     * @param state the state to run
+     */
+    protected nextState(state: T) {
+      this.setState(state)
       this.challenge()
     }
 
@@ -557,7 +606,7 @@ registerPlugin<Configuration>({
     challenge() {
       if (typeof this.cbs[this.challengeState] !== "function")
         throw new Error(`No function available to execute next`)
-      this.cbs[this.challengeState]()
+      this.getCallback(this.challengeState)()
     }
 
   }
@@ -575,7 +624,7 @@ registerPlugin<Configuration>({
 
   enum RequestChallengeState {
     ASK_INQUIRY,
-    DESCRIBE,
+    DESCRIBE_ISSUE,
     DONE
   }
 
@@ -588,11 +637,9 @@ registerPlugin<Configuration>({
 
     constructor(config: RequestChallengeConfig) {
       super(RequestChallengeState.ASK_INQUIRY)
-      this.setCallbacks([
-        this.checkInquiry.bind(this),
-        this.describeIssue.bind(this),
-        this.complete.bind(this)
-      ])
+      this.setCallback(RequestChallengeState.ASK_INQUIRY, this.checkInquiry.bind(this))
+      this.setCallback(RequestChallengeState.DESCRIBE_ISSUE, this.describeIssue.bind(this))
+      this.setCallback(RequestChallengeState.DONE, this.complete.bind(this))
       this.client = config.client
       this.parent = config.support
       this.done = config.done
@@ -604,6 +651,7 @@ registerPlugin<Configuration>({
       this.parent.roles.forEach((role, index) => {
         const cmd = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} request ${index}`)
         res += `\n${cmd}\n${role.department} - ${role.description}\n`
+        res += `\n${this.parent.getOnlineSupporters(role.department)} online`
       })
       this.client.chat(res)
     }
@@ -620,20 +668,101 @@ registerPlugin<Configuration>({
 
     setInquiry(index: number) {
       const role = this.parent.roles[index]
-      if (!role) return this.challenge()
+      if (!role) return this.nextState(RequestChallengeState.ASK_INQUIRY)
       this.result.role = role
-      return this.next()
+      return this.nextState(RequestChallengeState.DESCRIBE_ISSUE)
     }
 
     setIssue(issue: string) {
       if (issue.length < 10) {
         this.client.chat("Your issue description seems kinda short! Please try again!")
-        return this.challenge()
+        return this.nextState(RequestChallengeState.DESCRIBE_ISSUE)
       }
       this.result.issue = issue
-      return this.next()
+      return this.nextState(RequestChallengeState.DONE)
     }
   
+  }
+
+
+  interface SupportResponseChallengeConfig {
+    support: Support
+    queue: Queue
+    uid: string
+  }
+
+  enum SupportResponseChallengeState {
+    WAITING,
+    REQUEST,
+    ACCEPT,
+    DENY,
+    TIMEOUT,
+    COMPLETE,
+    UNRESOLVED
+  }
+
+  class SupportResponseChallenge extends Challenge<SupportResponseChallengeState> implements IChallengeQueue {
+
+    private parent: Support
+    private queue: Queue
+    private uid: string
+
+    constructor(config: SupportResponseChallengeConfig) {
+      super(SupportResponseChallengeState.WAITING)
+      this.parent = config.support
+      this.queue = config.queue
+      this.uid = config.uid
+      this.setCallback(SupportResponseChallengeState.REQUEST, this.request.bind(this))
+    }
+
+    start() {
+      return this.nextState(SupportResponseChallengeState.REQUEST)
+    }
+
+    private request() {
+      let request = `\nNew support request from ${this.queue.getClient().getURL()} with Issue:\n${this.queue.issue}\n`
+      const accept = this.parent.format.bold(`${this.parent.cmd.getCommandName()} accept`)
+      const decline = this.parent.format.bold(`${this.parent.cmd.getCommandName()} decline`)
+      request += `Use ${accept} to accept the support request`
+      request += `Use ${decline} to decline the support request`
+      this.getSupporterClient().chat(request)
+    }
+
+    private getSupporterClient() {
+      return this.parent.getClient(this.uid)
+    }
+  }
+
+
+  interface IChallengeQueue {
+    start(): void
+  }
+  type ChallengeQueueItem<T extends Challenge<any>> = IChallengeQueue & T
+
+  class ChallengeQueue<T extends Challenge<any>> {
+
+    private active?: ChallengeQueueItem<T>
+    readonly challenges: ChallengeQueueItem<T>[] = []
+
+    /**
+     * adds an item to the challenge Queue
+     * @param item item to add
+     */
+    add(item: ChallengeQueueItem<T>) {
+      this.challenges.push(item)
+      if (!this.active) this.next()
+    }
+
+    /**
+     * starts the next item in queue
+     */
+    next() {
+      const item = this.challenges.shift()
+      if (!item) return
+      this.active = item
+      item.start()
+    }
+
   }
 
 
