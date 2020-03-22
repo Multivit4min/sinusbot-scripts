@@ -228,6 +228,27 @@ registerPlugin<Configuration>({
     getPerm(name: string) {
       return Boolean(this.perms[name])
     }
+
+    /**
+     * retrieves a serializeable identifier
+     * in this case the department id
+     */
+    serialize() {
+      return this.department
+    }
+
+    /**
+     * creates a new empty role
+     */
+    static empty() {
+      return new Role({
+        cid: "0",
+        sgid: [],
+        department: "INVALID",
+        description: "INVALID",
+        permBlacklist: false
+      })
+    }
   }
 
 
@@ -285,6 +306,74 @@ registerPlugin<Configuration>({
     }
 
 
+  }
+
+
+
+  class Ticket {
+    
+    issuer: string = ""
+    issue: string = ""
+    role: Role = Role.empty()
+    created: number = 0
+
+    /**
+     * sets the identifier for the client which started the request
+     * @param uid 
+     */
+    setIssuer(uid: string) {
+      this.issuer = uid
+      return this
+    }
+
+    /**
+     * sets the ticket description
+     * @param issue text which describes the issue
+     */
+    setIssue(issue: string) {
+      this.issue = issue
+      return this
+    }
+
+    /**
+     * sets the role which handles this request
+     * @param role assigns a role to the ticket
+     */
+    setRole(role: Role) {
+      this.role = role
+      return this
+    }
+
+    /**
+     * sets the creation date of the ticket
+     * @param date 
+     */
+    setCreated(date: number) {
+      this.created = date
+      return this
+    }
+
+    /**
+     * checks if all necessary fields have been set
+     */
+    isValid() {
+      return (
+        this.issuer.length > 0 &&
+        this.issue.length > 0 &&
+        this.role.department !== "INVALID" &&
+        this.created > 0
+      )
+    }
+
+    /** returns serialized data */
+    serialize() {
+      return JSON.stringify({
+        issuer: this.issuer,
+        issue: this.issue,
+        created: this.created,
+        role: this.role ? this.role.serialize() : undefined
+      })
+    }
   }
 
 
@@ -493,14 +582,11 @@ registerPlugin<Configuration>({
     private getChallengeComplete(challenge: RequestChallenge) {
       this.pendingRequest.slice(this.pendingRequest.indexOf(challenge), 1)
       const queue = new Queue({
-        uid: challenge.client.uid(),
-        nick: challenge.client.nick(),
-        issue: challenge.result.issue!,
-        role: challenge.result.role!,
+        ticket: challenge.ticket,
         support: this
       })
       this.queue.push(queue)
-      this.getOnlineSupporters(challenge.result.role!.department)
+      this.getOnlineSupporters(challenge.ticket.role?.department)
         .forEach(({ client }) => {
           const challenge = new SupportResponseChallenge({
             support: this, queue, uid: client.uid()
@@ -558,38 +644,26 @@ registerPlugin<Configuration>({
 
 
   interface QueueConfig {
-    uid: string
-    nick: string
-    role: Role
-    issue: string
+    ticket: Ticket
     support: Support
   }
 
 
   class Queue {
 
-    private uid: string
-    private nick: string
-    readonly role: Role
-    readonly issue: string
+    readonly ticket: Ticket
     private parent: Support
 
     constructor(config: QueueConfig) {
-      this.uid = config.uid
-      this.nick = config.nick
-      this.role = config.role
-      this.issue = config.issue
+      this.ticket = config.ticket
       this.parent = config.support
     }
 
     /** serializes data to be able to save it */
     serialize() {
-      return JSON.stringify({
-        uid: this.uid,
-        nick: this.nick,
-        issue: this.issue,
-        role: this.role
-      })
+      return {
+        ticket: this.ticket.serialize()
+      }
     }
 
     /** deserializes data from a string */
@@ -619,14 +693,14 @@ registerPlugin<Configuration>({
     }
 
     getClient() {
-      return this.parent.getClient(this.uid)
+      return this.parent.getClient(this.ticket.issuer)
     }
 
     /**
      * gets a list of available supporters for this case
      */
     supporters() {
-      return this.parent.getOnlineSupporters(this.role.department)
+      return this.parent.getOnlineSupporters(this.ticket.role.department)
     }
   }
 
@@ -712,11 +786,6 @@ registerPlugin<Configuration>({
     done: (challenge: RequestChallenge) => void
   }
 
-  interface RequestChallengeResult {
-    role: Role
-    issue: string
-  }
-
   enum RequestChallengeState {
     ASK_INQUIRY,
     DESCRIBE_ISSUE,
@@ -727,7 +796,7 @@ registerPlugin<Configuration>({
   class RequestChallenge extends Challenge<RequestChallengeState> {
     readonly client: Client
     private readonly parent: Support
-    result: Partial<RequestChallengeResult> = {}
+    ticket: Ticket = new Ticket()
     private readonly done: (challenge: RequestChallenge) => void
 
     constructor(config: RequestChallengeConfig) {
@@ -757,6 +826,7 @@ registerPlugin<Configuration>({
     }
 
     private complete() {
+      this.ticket.setCreated(Date.now())
       this.client.chat("Your issue has been forwarded to an available Supporter!")
       this.done(this)
     }
@@ -764,7 +834,7 @@ registerPlugin<Configuration>({
     setInquiry(index: number) {
       const role = this.parent.roles[index]
       if (!role) return this.nextState(RequestChallengeState.ASK_INQUIRY)
-      this.result.role = role
+      this.ticket.setRole(role)
       return this.nextState(RequestChallengeState.DESCRIBE_ISSUE)
     }
 
@@ -773,7 +843,7 @@ registerPlugin<Configuration>({
         this.client.chat("Your issue description seems kinda short! Please try again!")
         return this.nextState(RequestChallengeState.DESCRIBE_ISSUE)
       }
-      this.result.issue = issue
+      this.ticket.setIssue(issue)
       return this.nextState(RequestChallengeState.DONE)
     }
   
@@ -818,7 +888,7 @@ registerPlugin<Configuration>({
 
     private request() {
       const client = this.queue.getClient()
-      let request = `\nNew support request from [URL=${client.getURL()}]${client.name()}[/URL] with issue:\n${this.parent.format.italic(this.queue.issue)}\n`
+      let request = `\nNew support request from [URL=${client.getURL()}]${client.name()}[/URL] with issue:\n${this.parent.format.italic(this.queue.ticket.issue)}\n`
       const accept = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} accept`)
       const decline = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} decline`)
       request += `\nUse ${accept} to accept the support request`
@@ -833,7 +903,7 @@ registerPlugin<Configuration>({
     private accepted() {
       const supporter = this.getSupporterClient()
       const client = this.queue.getClient()
-      const channel = this.queue.role.getChannel()
+      const channel = this.queue.ticket.role.getChannel()
       supporter.moveTo(channel)
       client.moveTo(channel)
     }
