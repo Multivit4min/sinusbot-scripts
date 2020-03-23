@@ -22,6 +22,18 @@ interface StorageProviderBlackListEntry {
 }
 
 
+interface StorageProviderTicketEntry {
+  id: number
+  status: "open"|"closed"
+  issuer: string
+  issue: string
+  created: number
+  department: string
+  resolvedText: string
+  resolvedBy: string
+}
+
+
 interface StorageProvider {
 
   /**
@@ -54,6 +66,26 @@ interface StorageProvider {
    * @param uid the uid to remove
    */
   removeBlacklist(uid: string): Promise<void>
+
+  /**
+   * creates a new ticket
+   * @param entry data which should get added to the store
+   * @returns returns the ticket id
+   */
+  addTicket(entry: Omit<StorageProviderTicketEntry, "id">): Promise<number>
+
+  /**
+   * retrieves a ticket by its property value
+   * @param prop the key to search for
+   * @param value the value it should match
+   */
+  getTicketBy(prop: keyof StorageProviderTicketEntry, value: string|number): Promise<StorageProviderTicketEntry[]>
+
+  /**
+   * removes a single ticket
+   * @param id ticket id to remove
+   */
+  removeTicket(id: number): Promise<void>
 }
 
 interface Configuration {
@@ -237,21 +269,32 @@ registerPlugin<Configuration>({
       return this.department
     }
 
+    static deleted() {
+      return Role.empty({
+        department: "_DELETED_",
+        description: "_DELETED_ROLE_"
+      })
+    }
+
     /**
      * creates a new empty role
      */
-    static empty() {
+    static empty(prefill: Partial<SupportRole> = {}) {
       return new Role({
         cid: "0",
         sgid: [],
-        department: "INVALID",
-        description: "INVALID",
-        permBlacklist: false
+        department: "_EMPTY_",
+        description: "_EMPTY_",
+        permBlacklist: false,
+        ...prefill
       })
     }
   }
 
 
+  interface BaseStoreConfig {
+    ticketId: number
+  }
 
   class BaseStore implements StorageProvider {
 
@@ -259,11 +302,15 @@ registerPlugin<Configuration>({
     readonly store = require("store")
 
     private get(name: "blacklist"): StorageProviderBlackListEntry[]
+    private get(name: "tickets"): StorageProviderTicketEntry[]
+    private get(name: "config"): BaseStoreConfig
     private get(name: string) {
       return this.store.getInstance(`${this.namespace}${name}`)
     }
 
     private set(name: "blacklist", value: StorageProviderBlackListEntry[]): void
+    private set(name: "tickets", value: StorageProviderTicketEntry[]): void
+    private set(name: "config", value: BaseStoreConfig): void
     private set(name: string, value: any): void {
       this.store.setInstance(`${this.namespace}${name}`, value)
     }
@@ -272,9 +319,25 @@ registerPlugin<Configuration>({
       return `${this.namespace}blacklist`
     }
 
+    static updateConfiguration(config: Partial<BaseStoreConfig> = {}): BaseStoreConfig {
+      return {
+        ticketId: 1,
+        ...config
+      }
+    }
+
+    private getTicketId() {
+      const config = this.get("config")
+      const id = config.ticketId++
+      this.set("config", config)
+      return id
+    }
+
     setup(namespace: string) {
       this.namespace = namespace
       if (!Array.isArray(this.get("blacklist"))) this.set("blacklist", [])
+      if (!Array.isArray(this.get("tickets"))) this.set("tickets", [])
+      this.set("config", BaseStore.updateConfiguration(this.get("config")))
       return Promise.resolve()
     }
 
@@ -305,6 +368,20 @@ registerPlugin<Configuration>({
       }
     }
 
+    addTicket(entry: Omit<StorageProviderTicketEntry, "id">) {
+      const id = this.getTicketId()
+      this.set("tickets", [...this.get("tickets"), { id, ...entry }])
+      return Promise.resolve(id)
+    }
+
+    removeTicket(id: number) {
+      this.set("tickets", this.get("tickets").filter(ticket => ticket.id !== id))
+      return Promise.resolve()
+    }
+
+    getTicketBy(prop: keyof StorageProviderTicketEntry, value: string|number) {
+      return Promise.resolve(this.get("tickets").filter(ticket => ticket[prop] === value))
+    }
 
   }
 
@@ -312,10 +389,14 @@ registerPlugin<Configuration>({
 
   class Ticket {
     
+    id: number = 0
     issuer: string = ""
     issue: string = ""
     role: Role = Role.empty()
     created: number = 0
+    status: "open"|"closed" = "open"
+    resolvedBy: string|undefined
+    resolvedText: string = "_EMPTY_"
 
     /**
      * sets the identifier for the client which started the request
@@ -354,6 +435,18 @@ registerPlugin<Configuration>({
     }
 
     /**
+     * closes this ticket and sets a reason
+     * @param uid the client which resolved the issue 
+     * @param text text 
+     */
+    closeTicket(uid: string, text: string) {
+      this.status = "closed"
+      this.resolvedBy = uid
+      this.resolvedText = text
+      return this
+    }
+
+    /**
      * checks if all necessary fields have been set
      */
     isValid() {
@@ -371,8 +464,22 @@ registerPlugin<Configuration>({
         issuer: this.issuer,
         issue: this.issue,
         created: this.created,
-        role: this.role ? this.role.serialize() : undefined
+        role: this.role ? this.role.serialize() : undefined,
+        status: this.status,
+        resolvedBy: this.resolvedBy,
+        resolvedText: this.resolvedText
       })
+    }
+
+    static fromStore(entry: StorageProviderTicketEntry, support: Support) {
+      const ticket = new Ticket()
+      ticket.setCreated(entry.created)
+      ticket.setIssue(entry.issue)
+      ticket.setIssuer(entry.issuer)
+      let role = support.getRoleByDepartment(entry.department)
+      if (!role) role = Role.deleted()
+      ticket.setRole(role)
+      return ticket
     }
   }
 
@@ -416,6 +523,14 @@ registerPlugin<Configuration>({
 
     get store() {
       return this.config.storage
+    }
+
+    /**
+     * retrieves a role by its department name
+     * @param department name of the department
+     */
+    getRoleByDepartment(department: string) {
+      return this.roles.find(role => role.department === department)
     }
 
     /**
