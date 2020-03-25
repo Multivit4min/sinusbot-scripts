@@ -9,6 +9,8 @@ interface SupportRole {
   cid: string
   sgid: string[]
   permBlacklist: boolean
+  permViewTickets: boolean
+  permDeveloper: boolean
   department: string
   description: string
 }
@@ -92,13 +94,18 @@ interface StorageProvider {
    * @param prop the key to search for
    * @param value the value it should match
    */
-  getTicketBy(prop: keyof StorageProviderTicketEntry, value: string|number): Promise<StorageProviderTicketEntry[]>
+  getTicketBy<T extends keyof StorageProviderTicketEntry>(prop: T, value: StorageProviderTicketEntry[T]): Promise<StorageProviderTicketEntry[]>
 
   /**
    * removes a single ticket
    * @param id ticket id to remove
    */
   removeTicket(id: number): Promise<void>
+
+  /**
+   * wipes the whole store
+   */
+  reset(): Promise<void>
 }
 
 interface Configuration {
@@ -167,8 +174,18 @@ registerPlugin<Configuration>({
       default: "-1"
     }, {
       type: "checkbox" as const,
-      title: "allow support blacklist?",
+      title: "allow access to command <!support blacklist>?",
       name: "permBlacklist",
+      default: false
+    }, {
+      type: "checkbox" as const,
+      title: "allow access to command <!support tickets>",
+      name: "permViewTickets",
+      default: false
+    }, {
+      type: "checkbox" as const,
+      title: "allow access to command <!support dev> (FOR DEVELOPMENT ONLY)",
+      name: "permDeveloper",
       default: false
     }, {
       type: "string" as const,
@@ -228,7 +245,7 @@ registerPlugin<Configuration>({
 
   class Role {
 
-    readonly isValid: boolean = true
+    readonly isValid: boolean
     private cid: string
     private sgid: string[]
     private perms: Record<string, boolean> = {}
@@ -242,6 +259,9 @@ registerPlugin<Configuration>({
       this.department = role.department
       this.description = role.description
       this.setPerm("blacklist", role.permBlacklist)
+      this.setPerm("tickets", role.permViewTickets)
+      this.setPerm("developer", role.permDeveloper)
+      this.isValid = role.isValid || role.isValid === undefined
     }
 
     /**
@@ -304,6 +324,8 @@ registerPlugin<Configuration>({
         department: "_EMPTY_",
         description: "_EMPTY_",
         permBlacklist: false,
+        permViewTickets: false,
+        permDeveloper: false,
         ...prefill,
         isValid: false
       })
@@ -409,6 +431,13 @@ registerPlugin<Configuration>({
 
     getTicketBy(prop: keyof StorageProviderTicketEntry, value: string|number) {
       return Promise.resolve(this.get("tickets").filter(ticket => ticket[prop] === value))
+    }
+
+    reset() {
+      this.set("blacklist", [])
+      this.set("tickets", [])
+      this.set("config", BaseStore.updateConfiguration())
+      return Promise.resolve()
     }
 
   }
@@ -608,7 +637,7 @@ registerPlugin<Configuration>({
         if (!ticket.isValid()) return debug(LOGLEVEL.INFO)(`Ignoring invalid Ticket with id ${t.id}!`)
         this.addTicket(ticket)
       })
-      this.cmd.help("manage support requests")
+      this.cmd.help("manages support requests")
       this.cmd
         .addCommand("request")
         .help("requests a supporter")
@@ -647,6 +676,61 @@ registerPlugin<Configuration>({
           if (!queue || !queue.active) return client.chat("Whooops something went wrong! (Queue not found or not active)")
           queue.active.decline()
         })
+      this.cmd
+        .addCommand("dev")
+        .help("developer features (not for productive environment!)")
+        .checkPermission(client => this.hasPermission(client, "developer"))
+        .addArgument(arg => arg.number.setName("action").positive().integer())
+        .exec(async (client, { action }: { action: number }, reply) => {
+          /**
+           * 001 - reset store
+           * 002 - 
+           * 004 - 
+           * 008 - 
+           * 016 - 
+           * 032 - 
+           * 064 - 
+           * 128 - 
+           */
+          if (action && 0x01 === 1) {
+            debug(LOGLEVEL.VERBOSE)("0x01: RESETTING STORE")
+            reply("0x01: Store has been resetted...")
+          }
+          reply("done")
+        })
+      this.cmd
+        .addCommand("tickets")
+        .help("gets status of all tickets")
+        .checkPermission(client => this.hasPermission(client, "tickets"))
+        .addArgument(args => args.string.setName("status").optional("any").whitelist(["any", "closed", "open"]).forceLowerCase())
+        .exec(async (client, { status }: { status: string }, reply) => {
+          if (["any", "open"].includes(status)) {
+            reply(`There are ${this.queue.length} open ticket${this.queue.length === 1 ? "" : "s"}!`)
+            //show open tickets
+            this.queue.forEach(({ ticket }) => {
+              const headline = `${this.format.bold(ticket.id.toString())} by client with uid ${ticket.issuer} on ${new Date(ticket.created)}`
+              reply(`\n${headline}\n\n${ticket.issue}`)
+            })
+          }
+          if (["any", "closed"].includes(status)) {
+            //show closed tickets
+            const tickets = await this.store.getTicketBy("status", "closed")
+            reply(`There are ${tickets.length} closed ticket${tickets.length === 1 ? "" : "s"}!`)
+            tickets.forEach(ticket => {
+              const headline = `${this.format.bold(ticket.id.toString())} by client with uid ${ticket.issuer} on ${new Date(ticket.created)}`
+              const caption = `Solved by uid ${ticket.resolvedBy} with text\n${ticket.resolvedText}`
+              reply(`\n${headline}\n${caption}\n\n${ticket.issue}`)
+            })
+          }
+        })
+    }
+
+    /**
+     * checks if a specific client has certain permission
+     */
+    hasPermission(client: Client, permission: string) {
+      debug(LOGLEVEL.VERBOSE)("hasPermission?", client.uid(), permission)
+      return this.getClientSupportRoles(client).some(role => role.getPerm(permission))
     }
 
     /**
