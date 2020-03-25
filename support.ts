@@ -28,13 +28,19 @@ interface StorageProviderTicketEntry {
   issuer: string
   issue: string
   created: number
-  department: string
+  role: string
   resolvedText: string
   resolvedBy: string
 }
 
 
 interface StorageProvider {
+
+  /**
+   * an incremental store version
+   * which validates if the store can be used with the current script
+   */
+  readonly version: number
 
   /**
    * gets called when the store gets setup
@@ -73,6 +79,13 @@ interface StorageProvider {
    * @returns returns the ticket id
    */
   addTicket(entry: Omit<StorageProviderTicketEntry, "id">): Promise<number>
+
+  /**
+   * creates a new ticket
+   * @param entry data which should get added to the store
+   * @returns returns the ticket id
+   */
+  updateTicket(entry: StorageProviderTicketEntry): Promise<void>
 
   /**
    * retrieves a ticket by its property value
@@ -208,9 +221,14 @@ registerPlugin<Configuration>({
   const debug = DEBUG([LOGLEVEL.ERROR, LOGLEVEL.WARNING, LOGLEVEL.INFO, LOGLEVEL.VERBOSE][config.DEBUGLEVEL])
 
 
+  ///////////////////////////////////////////////////////////
+  ///                      ROLE                           ///
+  ///////////////////////////////////////////////////////////
+
 
   class Role {
 
+    readonly isValid: boolean = true
     private cid: string
     private sgid: string[]
     private perms: Record<string, boolean> = {}
@@ -218,7 +236,7 @@ registerPlugin<Configuration>({
     readonly department: string
     readonly description: string
 
-    constructor(role: SupportRole) {
+    constructor(role: SupportRole & { isValid?: boolean }) {
       this.cid = role.cid
       this.sgid = role.sgid
       this.department = role.department
@@ -286,11 +304,15 @@ registerPlugin<Configuration>({
         department: "_EMPTY_",
         description: "_EMPTY_",
         permBlacklist: false,
-        ...prefill
+        ...prefill,
+        isValid: false
       })
     }
   }
 
+  ///////////////////////////////////////////////////////////
+  ///                   BaseStore                         ///
+  ///////////////////////////////////////////////////////////
 
   interface BaseStoreConfig {
     ticketId: number
@@ -300,6 +322,7 @@ registerPlugin<Configuration>({
 
     private namespace: string = ""
     readonly store = require("store")
+    readonly version = 1
 
     private get(name: "blacklist"): StorageProviderBlackListEntry[]
     private get(name: "tickets"): StorageProviderTicketEntry[]
@@ -374,6 +397,11 @@ registerPlugin<Configuration>({
       return Promise.resolve(id)
     }
 
+    updateTicket(entry: StorageProviderTicketEntry) {
+      this.set("tickets", this.get("tickets").map(ticket => ticket.id === entry.id ? entry : ticket))
+      return Promise.resolve()
+    }
+
     removeTicket(id: number) {
       this.set("tickets", this.get("tickets").filter(ticket => ticket.id !== id))
       return Promise.resolve()
@@ -386,6 +414,9 @@ registerPlugin<Configuration>({
   }
 
 
+  ///////////////////////////////////////////////////////////
+  ///                   Ticket                            ///
+  ///////////////////////////////////////////////////////////
 
   class Ticket {
     
@@ -453,14 +484,15 @@ registerPlugin<Configuration>({
       return (
         this.issuer.length > 0 &&
         this.issue.length > 0 &&
-        this.role.department !== "INVALID" &&
+        this.role.isValid &&
         this.created > 0
       )
     }
 
     /** returns serialized data */
     serialize() {
-      return JSON.stringify({
+      return {
+        id: this.id,
         issuer: this.issuer,
         issue: this.issue,
         created: this.created,
@@ -468,7 +500,7 @@ registerPlugin<Configuration>({
         status: this.status,
         resolvedBy: this.resolvedBy,
         resolvedText: this.resolvedText
-      })
+      }
     }
 
     static fromStore(entry: StorageProviderTicketEntry, support: Support) {
@@ -476,7 +508,7 @@ registerPlugin<Configuration>({
       ticket.setCreated(entry.created)
       ticket.setIssue(entry.issue)
       ticket.setIssuer(entry.issuer)
-      let role = support.getRoleByDepartment(entry.department)
+      let role = support.getRoleByDepartment(entry.role)
       if (!role) role = Role.deleted()
       ticket.setRole(role)
       return ticket
@@ -484,6 +516,9 @@ registerPlugin<Configuration>({
   }
 
 
+  ///////////////////////////////////////////////////////////
+  ///                   Support                           ///
+  ///////////////////////////////////////////////////////////
 
   interface SupportConfig {
     storage: StorageProvider
@@ -499,6 +534,7 @@ registerPlugin<Configuration>({
 
   class Support {
 
+    readonly REQUIRED_STORE_VERSION = 1
     readonly config: SupportConfig
     readonly backend = require("backend")
     readonly format = require("format")
@@ -563,7 +599,15 @@ registerPlugin<Configuration>({
      * setup functions
      */
     async setup(namespace: string) {
+      if (this.store.version !== this.REQUIRED_STORE_VERSION)
+        throw new Error(`Could not initialize Support Script! Required Store version is v${this.REQUIRED_STORE_VERSION} but installed is v${this.store.version}`)
       await this.store.setup(namespace)
+      const tickets = await this.store.getTicketBy("status", "open")
+      tickets.forEach(t => {
+        const ticket = Ticket.fromStore(t, this)
+        if (!ticket.isValid()) return debug(LOGLEVEL.INFO)(`Ignoring invalid Ticket with id ${t.id}!`)
+        this.addTicket(ticket)
+      })
       this.cmd.help("manage support requests")
       this.cmd
         .addCommand("request")
@@ -696,18 +740,24 @@ registerPlugin<Configuration>({
      */
     private getChallengeComplete(challenge: RequestChallenge) {
       this.pendingRequest.slice(this.pendingRequest.indexOf(challenge), 1)
-      const queue = new Queue({
-        ticket: challenge.ticket,
-        support: this
-      })
+      this.addTicket(challenge.ticket)
+    }
+
+    /**
+     * adds a ticket to queue and starts challenge
+     * @param ticket the ticket to add to the queue
+     * @returns retrieves the added queue entry
+     */
+    private addTicket(ticket: Ticket) {
+      const queue = new Queue({ ticket, support: this })
       this.queue.push(queue)
-      this.getOnlineSupporters(challenge.ticket.role?.department)
-        .forEach(({ client }) => {
-          const challenge = new SupportResponseChallenge({
-            support: this, queue, uid: client.uid()
-          })
-          this.addChallengeQueue(client.uid(), challenge)
+      this.getOnlineSupporters(ticket.role?.department).forEach(({ client }) => {
+        const challenge = new SupportResponseChallenge({
+          support: this, queue, uid: client.uid()
         })
+        this.addChallengeQueue(client.uid(), challenge)
+      })
+      return queue
     }
 
     /**
@@ -754,9 +804,23 @@ registerPlugin<Configuration>({
       const channel = this.getSupportChannel()
       if (channel.name() !== name) channel.setName(name)
     }
+
+    /**
+     * saves the current state to store
+     */
+    saveAll() {
+      return Promise.all(
+        this.queue
+          .filter(queue => queue.ticket.isValid())
+          .map(queue => this.store.updateTicket(<StorageProviderTicketEntry>queue.ticket.serialize()))
+      )
+    }
   }
 
 
+  ///////////////////////////////////////////////////////////
+  ///                   Queue                             ///
+  ///////////////////////////////////////////////////////////
 
   interface QueueConfig {
     ticket: Ticket
@@ -821,6 +885,9 @@ registerPlugin<Configuration>({
 
 
 
+  ///////////////////////////////////////////////////////////
+  ///                   Challenge                         ///
+  ///////////////////////////////////////////////////////////
 
   abstract class Challenge<T extends number> {
 
@@ -895,6 +962,12 @@ registerPlugin<Configuration>({
 
   }
 
+
+
+  ///////////////////////////////////////////////////////////
+  ///                 RequestChallenge                    ///
+  ///////////////////////////////////////////////////////////
+
   interface RequestChallengeConfig {
     client: Client,
     support: Support
@@ -964,6 +1037,10 @@ registerPlugin<Configuration>({
   
   }
 
+
+  ///////////////////////////////////////////////////////////
+  ///             SupportResponseChallenge                ///
+  ///////////////////////////////////////////////////////////
 
   interface SupportResponseChallengeConfig {
     support: Support
