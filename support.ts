@@ -31,8 +31,11 @@ interface StorageProviderTicketEntry {
   issue: string
   created: number
   role: string
+  resolved: boolean
   resolvedText: string
-  resolvedBy: string
+  resolvedDate: number
+  supporter: string
+  rating: number|undefined
 }
 
 
@@ -85,9 +88,9 @@ interface StorageProvider {
   /**
    * creates a new ticket
    * @param entry data which should get added to the store
-   * @returns returns the ticket id
+   * @returns returns the ticket id returns undefined if ticket is not in store
    */
-  updateTicket(entry: StorageProviderTicketEntry): Promise<void>
+  updateTicket(entry: StorageProviderTicketEntry): Promise<number|undefined>
 
   /**
    * retrieves a ticket by its property value
@@ -221,6 +224,8 @@ registerPlugin<Configuration>({
   }
 
   const MAX_CHANNEL_NAME_LENGTH = 40
+  //2 days
+  const MAX_AGE_FOR_RATING = 2 * 24 * 60 * 60 * 1000
 
   /** @param level current debug level */
   function DEBUG(level: LOGLEVEL) {
@@ -420,8 +425,10 @@ registerPlugin<Configuration>({
     }
 
     updateTicket(entry: StorageProviderTicketEntry) {
-      this.set("tickets", this.get("tickets").map(ticket => ticket.id === entry.id ? entry : ticket))
-      return Promise.resolve()
+      const tickets = this.get("tickets").map(ticket => ticket.id === entry.id ? entry : ticket)
+      const t = tickets.find(ticket => ticket.id === entry.id)
+      this.set("tickets", tickets)
+      return Promise.resolve(t ? t.id : undefined)
     }
 
     removeTicket(id: number) {
@@ -429,7 +436,7 @@ registerPlugin<Configuration>({
       return Promise.resolve()
     }
 
-    getTicketBy(prop: keyof StorageProviderTicketEntry, value: string|number) {
+    getTicketBy<T extends keyof StorageProviderTicketEntry>(prop: T, value: StorageProviderTicketEntry[T]) {
       return Promise.resolve(this.get("tickets").filter(ticket => ticket[prop] === value))
     }
 
@@ -450,13 +457,51 @@ registerPlugin<Configuration>({
   class Ticket {
     
     id: number = 0
-    issuer: string = ""
-    issue: string = ""
-    role: Role = Role.empty()
+    issuer: string
+    issue: string
+    role: Role
     created: number = 0
-    status: "open"|"closed" = "open"
-    resolvedBy: string|undefined
+    status: "open"|"closed"
+    supporter: string
+    resolved: boolean
     resolvedText: string = "_EMPTY_"
+    resolvedDate: number = 0
+    rating: number|undefined
+    readonly parent: Support
+
+    constructor(support: Support, prefill: Partial<StorageProviderTicketEntry> = {}) {
+      this.parent = support
+      this.id = prefill.id || 0
+      this.issuer = prefill.issuer || ""
+      this.issue = prefill.issue || ""
+      if (prefill.role) {
+        let role = support.getRoleByDepartment(prefill.role)
+        this.role = role ? role : Role.deleted()
+      } else {
+        this.role = Role.empty()
+      }
+      this.status = prefill.status || "open"
+      this.supporter = prefill.supporter ? prefill.supporter : ""
+      this.resolved = prefill.resolved || false
+      this.resolvedDate = prefill.resolvedDate || 0
+      this.resolvedText = prefill.resolvedText || "_EMPTY_"
+      this.rating = isNaN(prefill.rating!) ? undefined : prefill.rating
+    }
+
+    /**
+     * creates a pretty string to send in teamspeak chat
+     */
+    serializeChatTeamSpeak() {
+      let str = `\n${this.parent.format.bold(this.id.toString())} by client with uid ${this.issuer} on ${new Date(this.created)} with issue:\n${this.issue}`
+      if (this.resolved) str += `\n\nSolved by uid ${this.supporter} on ${new Date(this.resolvedDate)} with text:\n${this.resolvedText}`
+      if (!this.resolved && this.supporter !== "") str += `\n\nSupporter is client with uid ${this.supporter}`
+      return str
+    }
+
+    async save() {
+      this.id = await this.parent.saveTicket(this)
+      return this.id
+    }
 
     /**
      * sets the identifier for the client which started the request
@@ -493,17 +538,36 @@ registerPlugin<Configuration>({
       this.created = date
       return this
     }
+    
+    /**
+     * sets the supporter which handles this ticket
+     * @param uid 
+     */
+    setSupporter(uid: string) {
+      this.supporter = uid
+      this.save()
+      return this
+    }
+
+    /**
+     * sets a rating for this support ticket
+     * @param rating 
+     */
+    rate(rating: number) {
+      this.rating = rating
+      this.save()
+      return this
+    }
 
     /**
      * closes this ticket and sets a reason
-     * @param uid the client which resolved the issue 
-     * @param text text 
+     * @param text brief description why the ticket has been closed
      */
-    closeTicket(uid: string, text: string) {
+    closeTicket(text: string) {
       this.status = "closed"
-      this.resolvedBy = uid
       this.resolvedText = text
-      return this
+      this.resolvedDate = Date.now()
+      return this.save()
     }
 
     /**
@@ -519,28 +583,24 @@ registerPlugin<Configuration>({
     }
 
     /** returns serialized data */
-    serialize() {
+    serialize(): StorageProviderTicketEntry {
       return {
         id: this.id,
         issuer: this.issuer,
         issue: this.issue,
         created: this.created,
-        role: this.role ? this.role.serialize() : undefined,
+        role: this.role ? this.role.serialize() : "",
         status: this.status,
-        resolvedBy: this.resolvedBy,
-        resolvedText: this.resolvedText
+        supporter: this.supporter || "",
+        resolved: this.resolved,
+        resolvedText: this.resolvedText,
+        resolvedDate: this.resolvedDate,
+        rating: this.rating
       }
     }
 
-    static fromStore(entry: StorageProviderTicketEntry, support: Support) {
-      const ticket = new Ticket()
-      ticket.setCreated(entry.created)
-      ticket.setIssue(entry.issue)
-      ticket.setIssuer(entry.issuer)
-      let role = support.getRoleByDepartment(entry.role)
-      if (!role) role = Role.deleted()
-      ticket.setRole(role)
-      return ticket
+    static fromStore(support: Support, entry: StorageProviderTicketEntry) {
+      return new Ticket(support, entry)
     }
   }
 
@@ -568,6 +628,7 @@ registerPlugin<Configuration>({
     readonly backend = require("backend")
     readonly format = require("format")
     readonly cmd: Command.CommandGroup
+    private readonly sessions: SupportSession[] = []
     private readonly queue: SupportQueue = []
     private readonly pendingRequest: RequestChallenge[] = []
     private readonly challengeQueue: { [uid: string]: ChallengeQueue<SupportResponseChallenge> } = {}
@@ -603,7 +664,7 @@ registerPlugin<Configuration>({
      * @param uid the uid of the client to retrieve
      */
     getClient(uid: string) {
-      const client = this.backend.getClients().find(c => c.uid() === uid)
+      const client = this.backend.getClientByUID(uid)
       if (!client) throw new Error(`Client with uid ${uid} not found!`)
       return client
     }
@@ -624,6 +685,10 @@ registerPlugin<Configuration>({
       return this.store.getBlacklistEntry(typeof client === "string" ? client : client.uid())
     }
 
+    command(suffix: string) {
+      return `${this.cmd.getFullCommandName()} ${suffix}`
+    }
+
     /**
      * setup functions
      */
@@ -633,9 +698,9 @@ registerPlugin<Configuration>({
       await this.store.setup(namespace)
       const tickets = await this.store.getTicketBy("status", "open")
       tickets.forEach(t => {
-        const ticket = Ticket.fromStore(t, this)
+        const ticket = Ticket.fromStore(this, t)
         if (!ticket.isValid()) return debug(LOGLEVEL.INFO)(`Ignoring invalid Ticket with id ${t.id}!`)
-        this.addTicket(ticket)
+        this.addQueue(ticket)
       })
       this.cmd.help("manages support requests")
       this.cmd
@@ -677,6 +742,41 @@ registerPlugin<Configuration>({
           queue.active.decline()
         })
       this.cmd
+        .addCommand("rate")
+        .help("rates the experience of a ticket")
+        .addArgument(({ number }) => number.setName("ticket").min(0).integer())
+        .addArgument(({ number }) => number.setName("rating").min(0).max(5).integer())
+        .checkPermission(client => !this.isSupporter(client))
+        .exec(async (client, { ticket, rating }, reply) => {
+          const [entry] = await this.store.getTicketBy("id", ticket)
+          if (!entry || entry.issuer !== client.uid()) return reply(`No ticket with this id found!`)
+          if (entry.resolvedDate <= Date.now() - MAX_AGE_FOR_RATING) return reply("Ticket is too old to get rated!")
+          entry.rating = rating
+          await this.store.updateTicket(entry)
+          reply(`You rated ticket with id ${entry.id} with ${rating} stars!`)
+        })
+      this.cmd
+        .addCommand("view")
+        .help("see all your tickets")
+        .checkPermission(client => !this.isSupporter(client))
+        .exec(async (client, _, reply) => {
+          const tickets = await this.store.getTicketBy("issuer", client.uid())
+          if (tickets.length === 0) return reply("You do not have any tickets!")
+          reply(`You have created ${tickets.length} Ticket${tickets.length !== 1 ? "s" : ""}`)
+          tickets.map(entry => reply((new Ticket(this, entry)).serializeChatTeamSpeak()))
+        })
+      this.cmd
+        .addCommand("resolve")
+        .help("declines a request")
+        .checkPermission(client => !!this.getClientSupportSession(client))
+        .addArgument(({ rest }) => rest.setName("reason"))
+        .exec((client, { reason }, reply) => {
+          const session = this.getClientSupportSession(client)
+          if (!session) return client.chat("Whooops something went wrong! (Session not found or not active)")
+          session.resolve(reason)
+          reply("Ticket has been marked as resolved!")
+        })
+      this.cmd
         .addCommand("dev")
         .help("developer features (not for productive environment!)")
         .checkPermission(client => this.hasPermission(client, "developer"))
@@ -694,6 +794,8 @@ registerPlugin<Configuration>({
            */
           if (action && 0x01 === 1) {
             debug(LOGLEVEL.VERBOSE)("0x01: RESETTING STORE")
+            await this.store.reset()
+            debug(LOGLEVEL.VERBOSE)("0x01: Store has been resetted")
             reply("0x01: Store has been resetted...")
           }
           reply("done")
@@ -707,20 +809,13 @@ registerPlugin<Configuration>({
           if (["any", "open"].includes(status)) {
             reply(`There are ${this.queue.length} open ticket${this.queue.length === 1 ? "" : "s"}!`)
             //show open tickets
-            this.queue.forEach(({ ticket }) => {
-              const headline = `${this.format.bold(ticket.id.toString())} by client with uid ${ticket.issuer} on ${new Date(ticket.created)}`
-              reply(`\n${headline}\n\n${ticket.issue}`)
-            })
+            this.queue.forEach(({ ticket }) => reply(ticket.serializeChatTeamSpeak()))
           }
           if (["any", "closed"].includes(status)) {
             //show closed tickets
             const tickets = await this.store.getTicketBy("status", "closed")
             reply(`There are ${tickets.length} closed ticket${tickets.length === 1 ? "" : "s"}!`)
-            tickets.forEach(ticket => {
-              const headline = `${this.format.bold(ticket.id.toString())} by client with uid ${ticket.issuer} on ${new Date(ticket.created)}`
-              const caption = `Solved by uid ${ticket.resolvedBy} with text\n${ticket.resolvedText}`
-              reply(`\n${headline}\n${caption}\n\n${ticket.issue}`)
-            })
+            tickets.forEach(ticket => reply((new Ticket(this, ticket)).serializeChatTeamSpeak()))
           }
         })
     }
@@ -731,6 +826,30 @@ registerPlugin<Configuration>({
     hasPermission(client: Client, permission: string) {
       debug(LOGLEVEL.VERBOSE)("hasPermission?", client.uid(), permission)
       return this.getClientSupportRoles(client).some(role => role.getPerm(permission))
+    }
+
+    /**
+     * retrieves a support session of a client
+     * @param client client to check
+     */
+    getClientSupportSession(client: Client) {
+      return this.sessions.find(session => session.ticket.supporter === client.uid())
+    }
+
+    /**
+     * starts a new support session
+     */
+    createSupportSession(ticket: Ticket) {
+      const session = new SupportSession({ ticket })
+      this.sessions.push(session)
+      session.start()
+      return session
+    }
+
+    closeSupportSession(session: SupportSession) {
+      const index = this.sessions.indexOf(session)
+      if (index < 0) throw new Error(`Could not find support session!`)
+      this.sessions.splice(index, 1)
     }
 
     /**
@@ -751,7 +870,7 @@ registerPlugin<Configuration>({
      * @param client the client to retrieve the state for
      */
     clientGetChallenge(client: Client) {
-      return this.pendingRequest.find(req => client.uid() === req.client.uid())
+      return this.pendingRequest.find(req => client.uid() === req.ticket.issuer)
     }
 
     /**
@@ -824,7 +943,7 @@ registerPlugin<Configuration>({
      */
     private getChallengeComplete(challenge: RequestChallenge) {
       this.pendingRequest.slice(this.pendingRequest.indexOf(challenge), 1)
-      this.addTicket(challenge.ticket)
+      this.addQueue(challenge.ticket)
     }
 
     /**
@@ -832,8 +951,8 @@ registerPlugin<Configuration>({
      * @param ticket the ticket to add to the queue
      * @returns retrieves the added queue entry
      */
-    private addTicket(ticket: Ticket) {
-      const queue = new Queue({ ticket, support: this })
+    private addQueue(ticket: Ticket) {
+      const queue = new Queue({ ticket })
       this.queue.push(queue)
       this.getOnlineSupporters(ticket.role?.department).forEach(({ client }) => {
         const challenge = new SupportResponseChallenge({
@@ -842,6 +961,17 @@ registerPlugin<Configuration>({
         this.addChallengeQueue(client.uid(), challenge)
       })
       return queue
+    }
+
+    /**
+     * removes an element from the queue
+     * @param entry the entry to add
+     */
+    removeFromQueue(entry: Queue) {
+      const index = this.queue.indexOf(entry)
+      if (index < 0) throw new Error(`Could not find queue entry!`)
+      this.queue.splice(index, 1)
+      return this
     }
 
     /**
@@ -890,13 +1020,23 @@ registerPlugin<Configuration>({
     }
 
     /**
+     * saves a ticket to store
+     * @param ticket the ticket to save
+     */
+    async saveTicket(ticket: Ticket) {
+      const id = await this.store.updateTicket(ticket.serialize())
+      if (id) return id
+      return this.store.addTicket(ticket.serialize())
+    }
+
+    /**
      * saves the current state to store
      */
     saveAll() {
       return Promise.all(
         this.queue
           .filter(queue => queue.ticket.isValid())
-          .map(queue => this.store.updateTicket(<StorageProviderTicketEntry>queue.ticket.serialize()))
+          .map(queue => this.store.updateTicket(queue.ticket.serialize()))
       )
     }
   }
@@ -908,25 +1048,19 @@ registerPlugin<Configuration>({
 
   interface QueueConfig {
     ticket: Ticket
-    support: Support
   }
 
 
   class Queue {
 
     readonly ticket: Ticket
-    private parent: Support
 
     constructor(config: QueueConfig) {
       this.ticket = config.ticket
-      this.parent = config.support
     }
 
-    /** serializes data to be able to save it */
-    serialize() {
-      return {
-        ticket: this.ticket.serialize()
-      }
+    private get parent() {
+      return this.ticket.parent
     }
 
     /** deserializes data from a string */
@@ -947,15 +1081,15 @@ registerPlugin<Configuration>({
     /**
      * checks if the client is online
      */
-    isOnline() {
+    isIssuerOnline() {
       try {
-        return Boolean(this.getClient())
+        return Boolean(this.getIssuerClient())
       } catch (e) {
         return false
       }
     }
 
-    getClient() {
+    getIssuerClient() {
       return this.parent.getClient(this.ticket.issuer)
     }
 
@@ -965,8 +1099,66 @@ registerPlugin<Configuration>({
     supporters() {
       return this.parent.getOnlineSupporters(this.ticket.role.department)
     }
+
+    elevate(uid: string) {
+      this.parent.removeFromQueue(this)
+      this.ticket.setSupporter(uid)
+      this.parent.createSupportSession(this.ticket)
+    }
   }
 
+
+  ///////////////////////////////////////////////////////////
+  ///                 SupportSession                      ///
+  ///////////////////////////////////////////////////////////
+
+  interface SupportSessionConfig {
+    ticket: Ticket
+  }
+
+  class SupportSession {
+
+    readonly ticket: Ticket
+
+    constructor(config: SupportSessionConfig) {
+      this.ticket = config.ticket
+    }
+
+    start() {
+      this.moveTogether()
+    }
+
+    /**
+     * moves the supporter and the issuer to the assigned support channel
+     */
+    moveTogether() {
+      const issuer = this.parent.getClient(this.ticket.issuer)
+      const supporter = this.parent.getClient(this.ticket.supporter!)
+      if (!issuer || !supporter) return debug(LOGLEVEL.INFO)(`Will not move issuer client (${this.ticket.issuer}) and supporter client together (${this.ticket.supporter}), one of them has not been found!`)
+      const channel = this.ticket.role.getChannel()
+      if (!channel) {
+        supporter.chat(`Please move the client [URL=${issuer.getURL()}]${issuer.nick()}[/URL] to a support channel! (The correct support channel has not been found!)`)
+        return debug(LOGLEVEL.ERROR)(`Could not move into support channel of role ${this.ticket.role.department}, channel not found!`)
+      }
+      issuer.moveTo(channel)
+      supporter.moveTo(channel)
+    }
+
+    private get parent() {
+      return this.ticket.parent
+    }
+
+    resolve(reason: string) {
+      this.parent.closeSupportSession(this)
+      try {
+        const issuer = this.parent.getClient(this.ticket.issuer)
+        issuer.chat(`\nTicket has been marked as resolved! You can rate your experience with:\n${this.parent.format.bold(this.parent.command(`rate ${this.ticket.id} 0-5\n0 = bad, 5 = superb`))}`)
+      } catch (e) {
+        debug(LOGLEVEL.VERBOSE)(e)
+      }
+      return this.ticket.closeTicket(reason)
+    }
+  }
 
 
   ///////////////////////////////////////////////////////////
@@ -1066,40 +1258,47 @@ registerPlugin<Configuration>({
 
 
   class RequestChallenge extends Challenge<RequestChallengeState> {
-    readonly client: Client
-    private readonly parent: Support
-    ticket: Ticket = new Ticket()
+    ticket: Ticket
     private readonly done: (challenge: RequestChallenge) => void
 
     constructor(config: RequestChallengeConfig) {
       super(RequestChallengeState.ASK_INQUIRY)
+      this.ticket = new Ticket(config.support)
+      this.ticket.setIssuer(config.client.uid())
       this.setCallback(RequestChallengeState.ASK_INQUIRY, this.checkInquiry.bind(this))
       this.setCallback(RequestChallengeState.DESCRIBE_ISSUE, this.describeIssue.bind(this))
       this.setCallback(RequestChallengeState.DONE, this.complete.bind(this))
-      this.client = config.client
-      this.parent = config.support
       this.done = config.done
     }
 
+    private get parent() {
+      return this.ticket.parent
+    }
+
+    private chat(text: string) {
+      return this.parent.getClient(this.ticket.issuer).chat(text)
+    }
+
     private checkInquiry() {
-      this.client.chat(`What inquiry do you have?`)
+      this.chat(`What inquiry do you have?`)
       let res = ""
       this.parent.roles.forEach((role, index) => {
-        const cmd = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} request ${index}`)
+        const cmd = this.parent.format.bold(this.parent.command(`request ${index}`))
         res += `\n${cmd}\n${role.department} - ${role.description}`
         res += `\n${this.parent.getOnlineSupporters(role.department).length} online\n`
       })
-      this.client.chat(res)
+      this.chat(res)
     }
 
     private describeIssue() {
-      const describe = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} describe YOUR_DESCRIPTION_HERE`)
-      this.client.chat(`\nPlease describe your issue, use the following command:\n${describe}`)
+      const describe = this.parent.format.bold(this.parent.command(`describe YOUR_DESCRIPTION_HERE`))
+      this.chat(`\nPlease describe your issue, use the following command:\n${describe}`)
     }
 
     private complete() {
       this.ticket.setCreated(Date.now())
-      this.client.chat("Your issue has been forwarded to an available Supporter!")
+      this.ticket.save()
+      this.chat("Your issue has been forwarded to an available Supporter!")
       this.done(this)
     }
 
@@ -1112,7 +1311,7 @@ registerPlugin<Configuration>({
 
     setIssue(issue: string) {
       if (issue.length < 10) {
-        this.client.chat("Your issue description seems kinda short! Please try again!")
+        this.chat("Your issue description seems kinda short! Please try again!")
         return this.nextState(RequestChallengeState.DESCRIBE_ISSUE)
       }
       this.ticket.setIssue(issue)
@@ -1163,12 +1362,10 @@ registerPlugin<Configuration>({
     }
 
     private request() {
-      const client = this.queue.getClient()
+      const client = this.queue.getIssuerClient()
       let request = `\nNew support request from [URL=${client.getURL()}]${client.name()}[/URL] with issue:\n${this.parent.format.italic(this.queue.ticket.issue)}\n`
-      const accept = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} accept`)
-      const decline = this.parent.format.bold(`${this.parent.cmd.getFullCommandName()} decline`)
-      request += `\nUse ${accept} to accept the support request`
-      request += `\nUse ${decline} to decline the support request`
+      request += `\nUse ${this.parent.format.bold(this.parent.command(`accept`))} to accept the support request`
+      request += `\nUse ${this.parent.format.bold(this.parent.command(`decline`))} to decline the support request`
       this.getSupporterClient().chat(request)
     }
 
@@ -1177,11 +1374,7 @@ registerPlugin<Configuration>({
     }
 
     private accepted() {
-      const supporter = this.getSupporterClient()
-      const client = this.queue.getClient()
-      const channel = this.queue.ticket.role.getChannel()
-      supporter.moveTo(channel)
-      client.moveTo(channel)
+      this.queue.elevate(this.getSupporterClient().uid())
     }
 
     accept() {
