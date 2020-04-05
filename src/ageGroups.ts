@@ -1,4 +1,4 @@
-///<reference path="node_modules/sinusbot/typings/global.d.ts" />
+///<reference path="../node_modules/sinusbot/typings/global.d.ts" />
 
 import type { Client } from "sinusbot/typings/interfaces/Client"
 

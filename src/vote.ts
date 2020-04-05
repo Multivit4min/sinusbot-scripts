@@ -1,4 +1,4 @@
-///<reference path="node_modules/sinusbot/typings/global.d.ts" />
+///<reference path="../node_modules/sinusbot/typings/global.d.ts" />
 
 import type { Client } from "sinusbot/typings/interfaces/Client"
 import type { Command } from "sinusbot/typings/external/command"
@@ -19,7 +19,7 @@ registerPlugin<{
 }>({
   name: "Vote Reward",
   engine: ">= 1.0.0",
-  version: "1.0.0",
+  version: "1.1.0",
   description: "Group Vote Rewards for TeamSpeakServers.org",
   author: "Multivitamin <david.kartnaller@gmail.com",
   requiredModules: ["http"],
@@ -87,15 +87,16 @@ registerPlugin<{
 
   /** item structure which will stored */
   interface VoteItem {
-    nickname: string,
-    timestamp: number,
-    hash: string,
-    added: number,
-    claimedBy: string|null,
+    identifier: string
+    source: string
+    timestamp: number
+    hash: string
+    added: number
+    claimedBy: string|null
     claimedAt: number
   }
 
-  type PartialVoteItem = Omit<Partial<VoteItem>, "timestmap"|"nickname"> & Pick<VoteItem, "timestamp"|"nickname">
+  type PartialVoteItem = Omit<Partial<VoteItem>, "timestmap"|"identifier"> & Pick<VoteItem, "timestamp"|"identifier"|"source">
 
   abstract class Vote {
 
@@ -108,6 +109,12 @@ registerPlugin<{
     /** executes the api call and requests via Vote#requestAdd to add the item to store */
     protected abstract check(): Promise<void>
 
+    /** retrieves a client by its identifier */
+    protected abstract getClientByIdentifier(identifier: string): Client|undefined
+
+    /** retrieves the identifier for the client */
+    protected abstract getIdentifierByClient(client: Client|string): string|undefined
+  
     /** economy plugin */
     protected eco: any
 
@@ -171,7 +178,7 @@ registerPlugin<{
   
     /** retrieves the hash value of an item */
     private getHash(item: PartialVoteItem) {
-      return helpers.MD5Sum(`${item.nickname}${item.timestamp}`)
+      return helpers.MD5Sum(`${item.identifier}${item.timestamp}`)
     }
 
     /** finds an item with a specific hash */
@@ -181,7 +188,9 @@ registerPlugin<{
 
     /** handles a full client check */
     async checkClient(client: Client) {
-      const unclaimed = this.getUnclaimedByNickname(client.nick())
+      const id = this.getIdentifierByClient(client)
+      if (!id) return
+      const unclaimed = this.getUnclaimedByIdentifier(id)
       await Promise.all(unclaimed.map(item => this.tryMakeClaim(item, client)))
       this.checkGroups(client)
     }
@@ -211,7 +220,7 @@ registerPlugin<{
 
     /** tries to retrieve the client for which the vote is for */
     private getClientByItem(item: VoteItem) {
-      return backend.getClientByName(item.nickname)
+      return this.getClientByIdentifier(item.identifier)
     }
 
     /** validates the groups a client has */
@@ -271,10 +280,10 @@ registerPlugin<{
      * gets all unclaimed votes a client nickname can be assigned to
      * @param nick the nickname to check
      */
-    protected getUnclaimedByNickname(nick: string) {
+    protected getUnclaimedByIdentifier(identifier: string) {
       return this.getVotes()
         .filter(item => this.isUnclaimed(item))
-        .filter(item => item.nickname === nick)
+        .filter(item => item.identifier === identifier)
     }
 
     /**
@@ -327,8 +336,8 @@ registerPlugin<{
   interface TeamSpeakServersVoteResponseItem {
     date: string
     timestamp: number
-    nickname: string
-    steamid: null
+    identifier: string
+    steamid: string
     claimed: string
   }
 
@@ -338,13 +347,25 @@ registerPlugin<{
     protected service = "TeamSpeak-Servers.org"
     private apikey: string
     private sid: string
+    private steam: any
 
-    constructor({ key, sid, createCommand, eco }: { key: string, sid: string, createCommand: (cmd: string) => Command.Command, eco: any}) {
+    constructor({ key, sid, createCommand, eco, steam }: { key: string, sid: string, createCommand: (cmd: string) => Command.Command, eco: any, steam: any}) {
       super({ eco })
+      this.steam = steam
       this.apikey = key
       this.sid = sid
       this.registerCommand(createCommand)
       this.init()
+    }
+
+    protected getClientByIdentifier(identifier: string) {
+      const uid = this.steam.getUidFromSteamId(identifier)
+      if (!uid) return
+      return backend.getClientByUID(uid)
+    }
+
+    protected getIdentifierByClient(client: Client|string): string|undefined {
+      return this.steam.getSteamId(client)
     }
 
     /**
@@ -356,12 +377,13 @@ registerPlugin<{
         .manual("retrieves the vote link for teamspeak-servers.org")
         .manual(`vote daily to get rewarded with servergroups!`)
         .exec((client, _, reply) => {
+          if (!this.steam.getSteamId(client)) return reply(`No SteamID has been connected to your teamspeak client use "${this.steam.getCommandName()}" for more informations!`)
           reply(`[b][url=https://teamspeak-servers.org/server/${this.sid}/vote/?username=${encodeURI(client.nick())}]VOTE HERE[/url]`)
           reply(`It can take a few minutes until your vote gets counted!`)
           if (removeAfter === -1) {
-            reply(`You have have voted ${this.getVotesByClient(client).length} times!`)
+            reply(`You have voted ${this.getVotesByClient(client).length} times!`)
           } else {
-            reply(`You have have voted ${this.getVotesByClient(client).length} times in the last ${removeTime} days!`)
+            reply(`You have voted ${this.getVotesByClient(client).length} times in the last ${removeTime} days!`)
           }
           if (multiconomy) {
             const votes = this.getVotesByClient(client).length + 1
@@ -374,8 +396,9 @@ registerPlugin<{
     protected async check() {
       const votes = await this.fetchVotes()
       votes.forEach(vote => this.requestAdd({
-        nickname: vote.nickname,
-        timestamp: vote.timestamp
+        identifier: vote.steamid,
+        timestamp: vote.timestamp * 1000,
+        source: this.namespace
       }))
     }
 
@@ -454,10 +477,13 @@ registerPlugin<{
       if (!eco) throw new Error("MultiConomy.js not found! Please be sure to install and enable MultiConomy.js")
     }
 
+    const steam = require("steam")
+    if (!steam) throw new Error("This plugin requires steam.js! (Is it disabled or missing?) Please download this plugin from the resource section and enable it!")
+
     const command = require("command")
     const { createCommand } = command
 
-    votings.push(new TeamSpeakServers({ key, sid, createCommand, eco }))
+    votings.push(new TeamSpeakServers({ key, sid, createCommand, eco, steam }))
 
     if (backend.isConnected()) {
       initialized = true
