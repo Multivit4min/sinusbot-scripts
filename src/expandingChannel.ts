@@ -1,22 +1,41 @@
 ///<reference path="../node_modules/sinusbot/typings/global.d.ts" />
 
-import type { Channel } from "sinusbot/typings/interfaces/Channel"
+import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/Channel"
 
-interface ExpandingChannelConf {
+interface Config {
+  channels: ChannelConfig[]
+}
+
+interface ChannelConfig {
   parent: string
   name: string
   minfree: number
   deleteDelay: number
+  codec: string
+  quality: string
+  talkpower: number
+  maxClients: number
 }
+
+interface ExpandingChannelConfig {
+  name: string
+  parent: Channel
+  minimumFree: number
+  regex: RegExp
+  deleteDelay: number
+  codec: number
+  quality: number
+  talkpower: number
+  maxClients: number
+}
+
 type ExpandingChannelStructureInfo = ExpandingChannelStructureInfoEntry[]
 interface ExpandingChannelStructureInfoEntry {
   channel: Channel
   n: number
 }
 
-registerPlugin<{
-  channels: ExpandingChannelConf[]
-}>({
+registerPlugin<Config>({
   name: "Expanding Channels",
   engine: ">= 1.0.0",
   version: "0.1.0",
@@ -48,6 +67,28 @@ registerPlugin<{
       name: "deleteDelay",
       title: "Delay in seconds till the channel gets deleted after someone left (0 to disable)",
       default: 0
+    }, {
+      type: "select" as const,
+      name: "codec",
+      title: "Audio codec to use for the channel",
+      options: ["Opus Voice", "Opus Music"],
+      default: "0"
+    }, {
+      type: "select" as const,
+      name: "quality",
+      title: "Codec Quality to use for the channel",
+      options: ["1", "2", "3", "4", "5", "6", "7", "8", "9", "10"],
+      default: "9"
+    }, {
+      type: "number" as const,
+      name: "talkpower",
+      title: "required talkpower (0 to disable)",
+      default: 0
+    }, {
+      type: "number" as const,
+      name: "maxClients",
+      title: "maximum clients which are able to enter (-1 to disable)",
+      default: -1
     }]
   }]
 }, (_, { channels }) => {
@@ -63,19 +104,30 @@ registerPlugin<{
     private regex: RegExp
     private deleteDelay: number
     private deleteTimeout: any
+    private channelCreateParams: Partial<ChannelCreateParams> = {}
     private deleteTimeoutActive: boolean = false
 
-    constructor(config: { name: string, parent: Channel, minimumFree: number, regex: RegExp, deleteDelay: number }) {
+    constructor(config: ExpandingChannelConfig) {
       this.channelName = config.name
       this.parentChannel = config.parent
       this.minimumFree = config.minimumFree
       this.regex = config.regex
       this.deleteDelay = config.deleteDelay
+      this.channelCreateParams.codec = config.codec
+      this.channelCreateParams.codecQuality = config.quality
+      if (config.talkpower > 0) this.channelCreateParams.neededTalkPower = config.talkpower
+      this.channelCreateParams.maxClients = config.maxClients
       this.handleMoveEvent()
       setTimeout(() => this.checkFreeChannels(), 2 * 1000)
     }
 
     private handleMoveEvent() {
+      event.on("channelDelete", (channel, invoker) => {
+        if (invoker.isSelf()) return
+        const parent = channel.parent()
+        if (!parent || !parent.equals(this.parentChannel)) return
+        this.checkFreeChannels()
+      })
       event.on("clientMove", ({ fromChannel, toChannel }) => {
         const toParent = toChannel && toChannel.parent()
         const fromParent = fromChannel && fromChannel.parent()
@@ -87,7 +139,7 @@ registerPlugin<{
       })
     }
 
-    static from(config: ExpandingChannelConf) {
+    static from(config: ChannelConfig) {
       if (!(/\%/).test(config.name))
         throw new Error(`Could not find channel identificator '%' in channel name '${config.name}'`)
       const parent = backend.getChannelByID(config.parent)
@@ -98,6 +150,10 @@ registerPlugin<{
         parent,
         minimumFree: config.minfree,
         deleteDelay: config.deleteDelay * 1000,
+        codec: config.codec === "0" ? 4 : 5,
+        talkpower: config.talkpower,
+        maxClients: config.maxClients,
+        quality: parseInt(config.quality, 10) + 1,
         regex: new RegExp(`^${config.name
           .replace(/\(/g, "\\(").replace(/\)/g, "\\)")
           .replace(/\]/g, "\\]").replace(/\[/g, "\\[")
@@ -154,7 +210,7 @@ registerPlugin<{
       while (freeChannels++ < this.minimumFree) {
         const structure = this.getChannelStructureInfo(channels)
         const num = this.getNextFreeNumber(structure)
-        channels.push(this.createChannel(num, structure.length > 0 ? structure[num-2].channel.id() : "0"))
+        channels.push(this.createChannel(num, (num === 1 || structure.length === 0) ? "0" : structure[num-2].channel.id()))
       }
     }
 
@@ -170,7 +226,8 @@ registerPlugin<{
         parent: this.parentChannel.id(),
         permanent: true,
         encrypted: true,
-        position
+        position,
+        ...this.channelCreateParams
       })
     }
 
