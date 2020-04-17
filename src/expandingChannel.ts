@@ -6,6 +6,7 @@ interface ExpandingChannelConf {
   parent: string
   name: string
   minfree: number
+  deleteDelay: number
 }
 type ExpandingChannelStructureInfo = ExpandingChannelStructureInfoEntry[]
 interface ExpandingChannelStructureInfoEntry {
@@ -42,6 +43,11 @@ registerPlugin<{
       name: "minfree",
       title: "Minimum amount of free channels to generate (defaults to 1)",
       default: 1
+    }, {
+      type: "number" as const,
+      name: "deleteDelay",
+      title: "Delay in seconds till the channel gets deleted after someone left (0 to disable)",
+      default: 0
     }]
   }]
 }, (_, { channels }) => {
@@ -55,14 +61,18 @@ registerPlugin<{
     private parentChannel: Channel
     private minimumFree: number
     private regex: RegExp
+    private deleteDelay: number
+    private deleteTimeout: any
+    private deleteTimeoutActive: boolean = false
 
-    constructor(config: { name: string, parent: Channel, minimumFree: number, regex: RegExp }) {
+    constructor(config: { name: string, parent: Channel, minimumFree: number, regex: RegExp, deleteDelay: number }) {
       this.channelName = config.name
       this.parentChannel = config.parent
       this.minimumFree = config.minimumFree
       this.regex = config.regex
+      this.deleteDelay = config.deleteDelay
       this.handleMoveEvent()
-      this.checkFreeChannels()
+      setTimeout(() => this.checkFreeChannels(), 2 * 1000)
     }
 
     private handleMoveEvent() {
@@ -87,6 +97,7 @@ registerPlugin<{
         name: config.name,
         parent,
         minimumFree: config.minfree,
+        deleteDelay: config.deleteDelay * 1000,
         regex: new RegExp(`^${config.name
           .replace(/\(/g, "\\(").replace(/\)/g, "\\)")
           .replace(/\]/g, "\\]").replace(/\[/g, "\\[")
@@ -113,17 +124,37 @@ registerPlugin<{
       const channels = this.getSubChannels()
       let freeChannels = this.getEmptyChannels().length
       if (freeChannels > this.minimumFree) {
-        const structure = this.getChannelStructureInfo(channels)
-          .filter(({ channel }) => channel.getClientCount() === 0)
-        while (structure.length > this.minimumFree) {
-          structure.pop()!.channel.delete()
-        }
+        if (this.deleteDelay === 0) return this.deleteChannels(channels)
+        this.deleteWithDelay()
       } else if (freeChannels < this.minimumFree) {
-        while (freeChannels++ < this.minimumFree) {
-          const structure = this.getChannelStructureInfo(channels)
-          const num = this.getNextFreeNumber(structure)
-          channels.push(this.createChannel(num, structure.length > 0 ? structure[num-2].channel.id() : "0"))
-        }
+        clearTimeout(this.deleteTimeout)
+        this.createChannels(channels, freeChannels)
+      } else {
+        clearTimeout(this.deleteTimeout)
+      }
+    }
+    private deleteWithDelay() {
+      if (this.deleteTimeoutActive) return
+      this.deleteTimeoutActive = true
+      this.deleteTimeout = setTimeout(() => {
+        this.deleteTimeoutActive = false
+        this.deleteChannels(this.getSubChannels())
+      }, this.deleteDelay)
+    }
+
+    private deleteChannels(channels: Channel[]) {
+      const structure = this.getChannelStructureInfo(channels)
+        .filter(({ channel }) => channel.getClientCount() === 0)
+      while (structure.length > this.minimumFree) {
+        structure.pop()!.channel.delete()
+      }
+    }
+
+    private createChannels(channels: Channel[], freeChannels: number) {
+      while (freeChannels++ < this.minimumFree) {
+        const structure = this.getChannelStructureInfo(channels)
+        const num = this.getNextFreeNumber(structure)
+        channels.push(this.createChannel(num, structure.length > 0 ? structure[num-2].channel.id() : "0"))
       }
     }
 
