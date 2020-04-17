@@ -1,9 +1,9 @@
 {
-  "name": "agegroups",
+  "name": "sinusbot-scripts",
   "version": "1.0.0",
-  "description": "sinusbot script for assigning groups depending on age",
+  "description": "sinusbot scripts repositorys",
   "scripts": {
-    "build": "tsc && find . -path ./node_modules -prune -o -print | grep \\.js$ | xargs -n 1 ex '+g/^Object\\.defineProperty(exports,/d' -cwq"
+    "build": "tsc && find lib/ -path ./node_modules -prune -o -print | grep \\.js$ | xargs -n 1 ex '+g/^Object\\.defineProperty(exports,/d' -cwq"
   },
   "keywords": [
     "sinusbot",
