@@ -38,7 +38,7 @@ interface ExpandingChannelStructureInfoEntry {
 registerPlugin<Config>({
   name: "Expanding Channels",
   engine: ">= 1.0.0",
-  version: "0.1.0",
+  version: "1.0.0",
   description: "automatic channel creation tool based on use",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
