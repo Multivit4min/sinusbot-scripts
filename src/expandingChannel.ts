@@ -37,7 +37,7 @@ interface ExpandingChannelStructureInfoEntry {
 
 registerPlugin<Config>({
   name: "Expanding Channels",
-  engine: ">= 1.0.0",
+  engine: ">= 1.0.1",
   version: "1.0.0",
   description: "automatic channel creation tool based on use",
   author: "Multivitamin <david.kartnaller@gmail.com",
@@ -123,7 +123,7 @@ registerPlugin<Config>({
 
     private handleMoveEvent() {
       event.on("channelDelete", (channel, invoker) => {
-        if (invoker.isSelf()) return
+        if (invoker && invoker.isSelf()) return
         const parent = channel.parent()
         if (!parent || !parent.equals(this.parentChannel)) return
         this.checkFreeChannels()
