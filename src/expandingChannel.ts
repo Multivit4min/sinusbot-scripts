@@ -2,6 +2,13 @@
 
 import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/Channel"
 
+/**
+ * Changelog 1.1.0:
+ * fix invoker undefined when temporary channel gets deleted
+ * add support for roman numerals
+ * add support for permission i_channel_needed_join_power
+ */
+
 interface Config {
   channels: ChannelConfig[]
 }
@@ -15,31 +22,15 @@ interface ChannelConfig {
   quality: string
   talkpower: number
   maxClients: number
-}
-
-interface ExpandingChannelConfig {
-  name: string
-  parent: Channel
-  minimumFree: number
-  regex: RegExp
-  deleteDelay: number
-  codec: number
-  quality: number
-  talkpower: number
-  maxClients: number
-}
-
-type ExpandingChannelStructureInfo = ExpandingChannelStructureInfoEntry[]
-interface ExpandingChannelStructureInfoEntry {
-  channel: Channel
-  n: number
+  numerals: string
+  joinpower: number
 }
 
 registerPlugin<Config>({
   name: "Expanding Channels",
-  engine: ">= 1.0.1",
-  version: "1.0.0",
-  description: "automatic channel creation tool based on use",
+  engine: ">= 1.0.0",
+  version: "1.1.0",
+  description: "automatic channel creation tool based on need",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
   vars: [{
@@ -89,12 +80,111 @@ registerPlugin<Config>({
       name: "maxClients",
       title: "maximum clients which are able to enter (-1 to disable)",
       default: -1
+    }, {
+      type: "number" as const,
+      name: "joinpower",
+      title: "required channel join power (0 to disable)",
+      default: 0
+    }, {
+      type: "select" as const,
+      name: "numerals",
+      title: "Use Romand or Decimal numbers to show the channel count",
+      options: ["Decimal", "Roman"],
+      default: "0"
     }]
   }]
 }, (_, { channels }) => {
 
   const event = require("event")
   const backend = require("backend")
+
+
+  class Roman {
+
+    static upToTen(num: number, one: string, five: string, ten: string) {
+      let value = ""
+      switch (num) {
+        case 0: return value
+        case 9: return one + ten
+        case 4: return one + five
+      }
+      if (num >= 5) value = five, num -= 5
+      while (num-- > 0) value += one
+      return value
+    }
+
+    static isValid(roman: string) {
+      return (/^(M{0,3})(CM|DC{0,3}|CD|C{0,3})(XC|LX{0,3}|XL|X{0,3})(IX|VI{0,3}|IV|I{0,3})$/).test(roman.toUpperCase())
+    }
+
+    static toRoman(arabic: number) {
+      arabic = Math.floor(arabic)
+      if (arabic < 0) throw new Error("toRoman cannot express negative numbers")
+      if (arabic > 3999) throw new Error("toRoman cannot express numbers over 3999")
+      if (arabic === 0) return "nulla"
+      let roman = ""
+      roman += Roman.upToTen(Math.floor(arabic / 1000), "M", "", ""), arabic %= 1000
+      roman += Roman.upToTen(Math.floor(arabic / 100), "C", "D", "M"), arabic %= 100
+      roman += Roman.upToTen(Math.floor(arabic / 10), "X", "L", "C"), arabic %= 10
+      roman += Roman.upToTen(arabic, "I", "V", "X")
+      return roman
+    }
+
+    static toArabic(roman: string) {
+      if (/^nulla$/i.test(roman) || !roman.length) return 0
+      const match = roman.toUpperCase().match(/^(M{0,3})(CM|DC{0,3}|CD|C{0,3})(XC|LX{0,3}|XL|X{0,3})(IX|VI{0,3}|IV|I{0,3})$/)
+      if (!match) throw new Error("toArabic expects a valid roman number")
+      let arabic = 0
+      arabic += match[1].length * 1000
+      if (match[2] === "CM") {
+        arabic += 900
+      } else if (match[2] === "CD") {
+        arabic += 400
+      } else {
+        arabic += match[2].length * 100 + (match[2][0] === "D" ? 400 : 0)
+      }
+      if (match[3] === "XC")  {
+        arabic += 90
+      } else if (match[3] === "XL") {
+        arabic += 40
+      } else {
+        arabic += match[3].length * 10 + (match[3][0] === "L" ? 40 : 0)
+      }
+      if (match[4] === "IX") {
+        arabic += 9
+      } else if (match[4] === "IV") {
+        arabic += 4
+      } else {
+        arabic += match[4].length * 1 + (match[4][0] === "V" ? 4 : 0)
+      }
+      return arabic
+    }
+  }
+
+  enum ExpandingChannelNumeral {
+    DECIMAL = "0",
+    ROMAN = "1"
+  }
+
+  interface ExpandingChannelConfig {
+    name: string
+    parent: Channel
+    minimumFree: number
+    regex: RegExp
+    deleteDelay: number
+    codec: number
+    quality: number
+    talkpower: number
+    maxClients: number
+    numeralMode: ExpandingChannelNumeral
+    joinPower: number
+  }
+  
+  type ExpandingChannelStructureInfo = ExpandingChannelStructureInfoEntry[]
+  interface ExpandingChannelStructureInfoEntry {
+    channel: Channel
+    n: number
+  }
 
   class ExpandingChannel {
 
@@ -106,6 +196,8 @@ registerPlugin<Config>({
     private deleteTimeout: any
     private channelCreateParams: Partial<ChannelCreateParams> = {}
     private deleteTimeoutActive: boolean = false
+    private numeralMode: ExpandingChannelNumeral
+    private joinPower: number
 
     constructor(config: ExpandingChannelConfig) {
       this.channelName = config.name
@@ -117,10 +209,13 @@ registerPlugin<Config>({
       this.channelCreateParams.codecQuality = config.quality
       if (config.talkpower > 0) this.channelCreateParams.neededTalkPower = config.talkpower
       this.channelCreateParams.maxClients = config.maxClients
+      this.numeralMode = config.numeralMode
+      this.joinPower = config.joinPower
       this.handleMoveEvent()
       setTimeout(() => this.checkFreeChannels(), 2 * 1000)
     }
 
+    /** register events */
     private handleMoveEvent() {
       event.on("channelDelete", (channel, invoker) => {
         if (invoker && invoker.isSelf()) return
@@ -139,11 +234,12 @@ registerPlugin<Config>({
       })
     }
 
+    /** creates a new class from a configuration */
     static from(config: ChannelConfig) {
       if (!(/\%/).test(config.name))
-        throw new Error(`Could not find channel identificator '%' in channel name '${config.name}'`)
+        throw new Error(`Could not find channel identificator "%" in channel name "${config.name}"`)
       const parent = backend.getChannelByID(config.parent)
-      if (!parent) throw new Error(`could not find parent channel id ${parent} on expanding channel with name '${config.name}'`)
+      if (!parent) throw new Error(`could not find parent channel id ${parent} on expanding channel with name "${config.name}"`)
       if (config.minfree < 1) throw new Error(`Minimum free Channels is smaller than 1! (${config.minfree})`)
       return new ExpandingChannel({
         name: config.name,
@@ -154,6 +250,8 @@ registerPlugin<Config>({
         talkpower: config.talkpower,
         maxClients: config.maxClients,
         quality: parseInt(config.quality, 10) + 1,
+        numeralMode: config.numerals === "0" ? ExpandingChannelNumeral.DECIMAL : ExpandingChannelNumeral.ROMAN,
+        joinPower: config.joinpower,
         regex: new RegExp(`^${config.name
           .replace(/\(/g, "\\(").replace(/\)/g, "\\)")
           .replace(/\]/g, "\\]").replace(/\[/g, "\\[")
@@ -178,6 +276,7 @@ registerPlugin<Config>({
 
     checkFreeChannels() {
       const channels = this.getSubChannels()
+      this.updateChannels(channels)
       let freeChannels = this.getEmptyChannels().length
       if (freeChannels > this.minimumFree) {
         if (this.deleteDelay === 0) return this.deleteChannels(channels)
@@ -189,6 +288,19 @@ registerPlugin<Config>({
         clearTimeout(this.deleteTimeout)
       }
     }
+
+    /** updates all channel names or deletes them if the name does not match */
+    private updateChannels(channels: Channel[]) {
+      channels.map(channel => {
+        const num = this.getNumberFromName(channel.name())
+        if (num === 0) channel.delete()
+        const name = this.getChannelName(num)
+        if (name === channel.name()) return
+        channel.setName(name)
+      })
+    }
+
+    /** starts a delay to delete channels */
     private deleteWithDelay() {
       if (this.deleteTimeoutActive) return
       this.deleteTimeoutActive = true
@@ -198,6 +310,7 @@ registerPlugin<Config>({
       }, this.deleteDelay)
     }
 
+    /** deletes some amount of channels */
     private deleteChannels(channels: Channel[]) {
       const structure = this.getChannelStructureInfo(channels)
         .filter(({ channel }) => channel.getClientCount() === 0)
@@ -206,6 +319,7 @@ registerPlugin<Config>({
       }
     }
 
+    /** creates the required amount of channels */
     private createChannels(channels: Channel[], freeChannels: number) {
       while (freeChannels++ < this.minimumFree) {
         const structure = this.getChannelStructureInfo(channels)
@@ -214,14 +328,16 @@ registerPlugin<Config>({
       }
     }
 
+    /** get a set of channels with its channel order number */
     getChannelStructureInfo(channels: Channel[]): ExpandingChannelStructureInfo {
       return channels
         .map(c => ({ channel: c, n: this.getNumberFromName(c.name())}))
         .sort((c1: any, c2: any) => c1.n - c2.n)    
     }
 
+    /** creates a channel and sets all necessary parameters */
     private createChannel(num: number, position: string) {
-      return backend.createChannel({
+      const channel = backend.createChannel({
         name: this.getChannelName(num),
         parent: this.parentChannel.id(),
         permanent: true,
@@ -229,8 +345,16 @@ registerPlugin<Config>({
         position,
         ...this.channelCreateParams
       })
+      if (!channel) throw new Error("error while trying to create a channel!")
+      if (this.joinPower !== 0) {
+        const permission = channel.addPermission("i_channel_needed_join_power")
+        permission.setValue(this.joinPower)
+        permission.save()
+      }
+      return channel
     }
 
+    /** gets the next free channel number in the structure */
     getNextFreeNumber(structure: ExpandingChannelStructureInfo) {
       const taken = structure.map(c => c.n)
       let i = 0
@@ -238,14 +362,30 @@ registerPlugin<Config>({
       return i
     }
 
+    /**
+     * retrieves the channels order number
+     * @param name channel name to check
+     */
     getNumberFromName(name: string) {
       const match = name.match(this.regex)
       if (!match) return 0
-      return parseInt(match[1])
+      const dec = parseInt(match[1], 10)
+      if (!isNaN(dec)) {
+        return dec
+      } else if (Roman.isValid(match[1])) {
+        return Roman.toArabic(match[1])
+      } else {
+        return 0
+      }
     }
 
+    /**
+     * gets the actual name for this channel
+     * @param num 
+     */
     getChannelName(num: number) {
-      return this.channelName.replace(/\%/, String(num))
+      const str = this.numeralMode === ExpandingChannelNumeral.DECIMAL ? String(num) : Roman.toRoman(num)
+      return this.channelName.replace(/\%/, str)
     }
   }
 
