@@ -450,7 +450,6 @@ registerPlugin<Config>({
 
   function init() {
     channels.forEach(config => {
-      console.log({ config })
       ExpandingChannel.from(config)
     })
   }
