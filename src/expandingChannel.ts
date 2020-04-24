@@ -7,10 +7,22 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * fix invoker undefined when temporary channel gets deleted
  * add support for roman numerals
  * add support for permission i_channel_needed_join_power
+ * Changelog 1.2.0:
+ * add support of setting description and topic
+ * add support of setting custom permisisons
+ * removed joinPower setting
  */
 
 interface Config {
   channels: ChannelConfig[]
+}
+
+type PermissionConfig = PermissionConfigEntry[]
+interface PermissionConfigEntry {
+  name: string
+  value: number
+  skip: boolean
+  negate: boolean
 }
 
 interface ChannelConfig {
@@ -24,12 +36,15 @@ interface ChannelConfig {
   maxClients: number
   numerals: string
   joinpower: number
+  description: string
+  topic: string
+  permissions: PermissionConfig
 }
 
 registerPlugin<Config>({
   name: "Expanding Channels",
   engine: ">= 1.0.0",
-  version: "1.1.0",
+  version: "1.2.0",
   description: "automatic channel creation tool based on need",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
@@ -86,11 +101,47 @@ registerPlugin<Config>({
       title: "required channel join power (0 to disable)",
       default: 0
     }, {
+      type: "string" as const,
+      name: "topic",
+      title: "Channel Topic to set",
+      default: ""
+    }, {
+      type: "multiline" as const,
+      name: "description",
+      title: "Channel description:",
+      default: ""
+    }, {
       type: "select" as const,
       name: "numerals",
       title: "Use Romand or Decimal numbers to show the channel count",
       options: ["Decimal", "Roman"],
       default: "0"
+    }, {
+      type: "array" as const,
+      name: "permissions",
+      title: "Set Custom Permissions",
+      vars: [{
+        type: "string" as const,
+        name: "name",
+        title: "Permission name (eg 'b_channel_create_child')",
+        default: "__INVALID__",
+      }, {
+        type: "number" as const,
+        name: "value",
+        title: "Permission value",
+        default: 0,
+      }, {
+        type: "checkbox" as const,
+        name: "skip",
+        title: "Set skip flag?",
+        default: false,
+      }, {
+        type: "checkbox" as const,
+        name: "negate",
+        title: "Set negate flag?",
+        default: false,
+      }],
+      default: []
     }]
   }]
 }, (_, { channels }) => {
@@ -172,12 +223,9 @@ registerPlugin<Config>({
     minimumFree: number
     regex: RegExp
     deleteDelay: number
-    codec: number
-    quality: number
-    talkpower: number
-    maxClients: number
+    channelOpts: Omit<ChannelCreateParams, "name"|"parent">
     numeralMode: ExpandingChannelNumeral
-    joinPower: number
+    permissions: PermissionConfig
   }
   
   type ExpandingChannelStructureInfo = ExpandingChannelStructureInfoEntry[]
@@ -194,10 +242,10 @@ registerPlugin<Config>({
     private regex: RegExp
     private deleteDelay: number
     private deleteTimeout: any
-    private channelCreateParams: Partial<ChannelCreateParams> = {}
+    private channelOpts: Omit<ChannelCreateParams, "name"|"parent"> = {}
     private deleteTimeoutActive: boolean = false
     private numeralMode: ExpandingChannelNumeral
-    private joinPower: number
+    private permissions: PermissionConfig
 
     constructor(config: ExpandingChannelConfig) {
       this.channelName = config.name
@@ -205,12 +253,9 @@ registerPlugin<Config>({
       this.minimumFree = config.minimumFree
       this.regex = config.regex
       this.deleteDelay = config.deleteDelay
-      this.channelCreateParams.codec = config.codec
-      this.channelCreateParams.codecQuality = config.quality
-      if (config.talkpower > 0) this.channelCreateParams.neededTalkPower = config.talkpower
-      this.channelCreateParams.maxClients = config.maxClients
+      this.channelOpts = config.channelOpts
       this.numeralMode = config.numeralMode
-      this.joinPower = config.joinPower
+      this.permissions = config.permissions
       this.handleMoveEvent()
       setTimeout(() => this.checkFreeChannels(), 2 * 1000)
     }
@@ -241,17 +286,22 @@ registerPlugin<Config>({
       const parent = backend.getChannelByID(config.parent)
       if (!parent) throw new Error(`could not find parent channel id ${parent} on expanding channel with name "${config.name}"`)
       if (config.minfree < 1) throw new Error(`Minimum free Channels is smaller than 1! (${config.minfree})`)
+      const channelOpts: Omit<ChannelCreateParams, "name"|"parent"> = {
+        codec: config.codec === "0" ? 4 : 5,
+        codecQuality: parseInt(config.quality, 10) + 1,
+        maxClients: config.maxClients,
+        description: config.description,
+        topic: config.topic
+      }
+      if (config.talkpower > 0) channelOpts.neededTalkPower = config.talkpower
       return new ExpandingChannel({
         name: config.name,
         parent,
         minimumFree: config.minfree,
         deleteDelay: config.deleteDelay * 1000,
-        codec: config.codec === "0" ? 4 : 5,
-        talkpower: config.talkpower,
-        maxClients: config.maxClients,
-        quality: parseInt(config.quality, 10) + 1,
+        channelOpts,
+        permissions: config.permissions.filter(perm => perm.name !== "__INVALID__"),
         numeralMode: config.numerals === "0" ? ExpandingChannelNumeral.DECIMAL : ExpandingChannelNumeral.ROMAN,
-        joinPower: config.joinpower,
         regex: new RegExp(`^${config.name
           .replace(/\(/g, "\\(").replace(/\)/g, "\\)")
           .replace(/\]/g, "\\]").replace(/\[/g, "\\[")
@@ -343,14 +393,17 @@ registerPlugin<Config>({
         permanent: true,
         encrypted: true,
         position,
-        ...this.channelCreateParams
+        ...this.channelOpts
       })
       if (!channel) throw new Error("error while trying to create a channel!")
-      if (this.joinPower !== 0) {
-        const permission = channel.addPermission("i_channel_needed_join_power")
-        permission.setValue(this.joinPower)
-        permission.save()
-      }
+      this.permissions.forEach(perm => {
+        const permission = channel.addPermission(perm.name)
+        permission.setValue(perm.value)
+        if (perm.skip) permission.setSkip(true)
+        if (perm.negate) permission.setNegated(true)
+        const ok = permission.save()
+        if (!ok) console.log(`there was a problem saving a permission!`, { perm })
+      })
       return channel
     }
 
@@ -397,6 +450,7 @@ registerPlugin<Config>({
 
   function init() {
     channels.forEach(config => {
+      console.log({ config })
       ExpandingChannel.from(config)
     })
   }
