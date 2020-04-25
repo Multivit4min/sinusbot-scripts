@@ -11,6 +11,9 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * add support of setting description and topic
  * add support of setting custom permissions
  * removed joinPower setting
+ * Changelog 1.3.0:
+ * automatically convert UINT32 to INT32 for i_icon_id
+ * 
  */
 
 interface Config {
@@ -148,7 +151,7 @@ registerPlugin<Config>({
 
   const event = require("event")
   const backend = require("backend")
-
+  const INT32_MAX = 2147483647
 
   class Roman {
 
@@ -294,13 +297,20 @@ registerPlugin<Config>({
         topic: config.topic
       }
       if (config.talkpower > 0) channelOpts.neededTalkPower = config.talkpower
+      const permissions = config.permissions.filter(perm => perm.name !== "__INVALID__").map(perm => {
+        if (perm.name !== "i_icon_id") return perm
+        return {
+          value: perm.value > INT32_MAX ? perm.value - INT32_MAX * 2 : perm.value,
+          ...perm
+        }
+      })
       return new ExpandingChannel({
         name: config.name,
         parent,
         minimumFree: config.minfree,
         deleteDelay: config.deleteDelay * 1000,
         channelOpts,
-        permissions: config.permissions.filter(perm => perm.name !== "__INVALID__"),
+        permissions,
         numeralMode: config.numerals === "0" ? ExpandingChannelNumeral.DECIMAL : ExpandingChannelNumeral.ROMAN,
         regex: new RegExp(`^${config.name
           .replace(/\(/g, "\\(").replace(/\)/g, "\\)")
