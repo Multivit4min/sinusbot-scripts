@@ -9,7 +9,7 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * add support for permission i_channel_needed_join_power
  * Changelog 1.2.0:
  * add support of setting description and topic
- * add support of setting custom permisisons
+ * add support of setting custom permissions
  * removed joinPower setting
  */
 
