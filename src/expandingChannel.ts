@@ -13,11 +13,17 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * removed joinPower setting
  * Changelog 1.3.0:
  * automatically convert UINT32 to INT32 for i_icon_id
- * 
+ * implement support for various custom channel names
  */
 
 interface Config {
   channels: ChannelConfig[]
+}
+
+type NameReplaceConfig = NameReplaceConfigEntry[]
+interface NameReplaceConfigEntry {
+  number: number
+  value: string
 }
 
 type PermissionConfig = PermissionConfigEntry[]
@@ -41,13 +47,14 @@ interface ChannelConfig {
   joinpower: number
   description: string
   topic: string
+  names: NameReplaceConfig
   permissions: PermissionConfig
 }
 
 registerPlugin<Config>({
   name: "Expanding Channels",
   engine: ">= 1.0.0",
-  version: "1.2.0",
+  version: "1.3.0",
   description: "automatic channel creation tool based on need",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
@@ -66,6 +73,12 @@ registerPlugin<Config>({
       name: "name",
       title: "Channel Name, use % to indicate the position of the number eg ('Talk %' gets converted to 'Talk 1')",
       default: ""
+    }, {
+      type: "select" as const,
+      name: "numerals",
+      title: "Use Romand or Decimal numbers to show the channel count",
+      options: ["Decimal", "Roman", "Binary"],
+      default: "0"
     }, {
       type: "number" as const,
       name: "minfree",
@@ -114,11 +127,21 @@ registerPlugin<Config>({
       title: "Channel description:",
       default: ""
     }, {
-      type: "select" as const,
-      name: "numerals",
-      title: "Use Romand or Decimal numbers to show the channel count",
-      options: ["Decimal", "Roman"],
-      default: "0"
+      type: "array" as const,
+      name: "names",
+      title: "Custom channel names",
+      default: [],
+      vars: [{
+        type: "number" as const,
+        name: "number",
+        title: "number to replace",
+        default: -1
+      }, {
+        type: "string" as const,
+        name: "value",
+        title: "channel name to use as replacement",
+        default: "__NO_TEXT_GIVEN__"
+      }]
     }, {
       type: "array" as const,
       name: "permissions",
@@ -217,7 +240,8 @@ registerPlugin<Config>({
 
   enum ExpandingChannelNumeral {
     DECIMAL = "0",
-    ROMAN = "1"
+    ROMAN = "1",
+    BINARY = "2"
   }
 
   interface ExpandingChannelConfig {
@@ -229,6 +253,7 @@ registerPlugin<Config>({
     channelOpts: Omit<ChannelCreateParams, "name"|"parent">
     numeralMode: ExpandingChannelNumeral
     permissions: PermissionConfig
+    names: NameReplaceConfig
   }
   
   type ExpandingChannelStructureInfo = ExpandingChannelStructureInfoEntry[]
@@ -249,6 +274,7 @@ registerPlugin<Config>({
     private deleteTimeoutActive: boolean = false
     private numeralMode: ExpandingChannelNumeral
     private permissions: PermissionConfig
+    private names: NameReplaceConfig
 
     constructor(config: ExpandingChannelConfig) {
       this.channelName = config.name
@@ -259,6 +285,7 @@ registerPlugin<Config>({
       this.channelOpts = config.channelOpts
       this.numeralMode = config.numeralMode
       this.permissions = config.permissions
+      this.names = config.names
       this.handleMoveEvent()
       setTimeout(() => this.checkFreeChannels(), 2 * 1000)
     }
@@ -297,13 +324,21 @@ registerPlugin<Config>({
         topic: config.topic
       }
       if (config.talkpower > 0) channelOpts.neededTalkPower = config.talkpower
-      const permissions = config.permissions.filter(perm => perm.name !== "__INVALID__").map(perm => {
+      const permissions = (config.permissions||[]).filter(perm => perm.name !== "__INVALID__").map(perm => {
         if (perm.name !== "i_icon_id") return perm
         return {
-          value: perm.value > INT32_MAX ? perm.value - INT32_MAX * 2 : perm.value,
-          ...perm
+          ...perm,
+          value: perm.value > INT32_MAX ? perm.value - 0xFFFFFFFF - 1: perm.value
         }
       })
+      const numeralMode = (() => {
+        switch (config.numerals) {
+          case "0": return ExpandingChannelNumeral.DECIMAL
+          case "1": return ExpandingChannelNumeral.ROMAN
+          case "2": return ExpandingChannelNumeral.BINARY
+          default: return ExpandingChannelNumeral.DECIMAL
+        }
+      })()
       return new ExpandingChannel({
         name: config.name,
         parent,
@@ -311,7 +346,8 @@ registerPlugin<Config>({
         deleteDelay: config.deleteDelay * 1000,
         channelOpts,
         permissions,
-        numeralMode: config.numerals === "0" ? ExpandingChannelNumeral.DECIMAL : ExpandingChannelNumeral.ROMAN,
+        names: (config.names||[]).filter(n => n.number > 0),
+        numeralMode,
         regex: new RegExp(`^${config.name
           .replace(/\(/g, "\\(").replace(/\)/g, "\\)")
           .replace(/\]/g, "\\]").replace(/\[/g, "\\[")
@@ -353,7 +389,7 @@ registerPlugin<Config>({
     private updateChannels(channels: Channel[]) {
       channels.map(channel => {
         const num = this.getNumberFromName(channel.name())
-        if (num === 0) channel.delete()
+        if (num === 0) return channel.delete()
         const name = this.getChannelName(num)
         if (name === channel.name()) return
         channel.setName(name)
@@ -392,7 +428,7 @@ registerPlugin<Config>({
     getChannelStructureInfo(channels: Channel[]): ExpandingChannelStructureInfo {
       return channels
         .map(c => ({ channel: c, n: this.getNumberFromName(c.name())}))
-        .sort((c1: any, c2: any) => c1.n - c2.n)    
+        .sort((c1: any, c2: any) => c1.n - c2.n)
     }
 
     /** creates a channel and sets all necessary parameters */
@@ -407,6 +443,7 @@ registerPlugin<Config>({
       })
       if (!channel) throw new Error("error while trying to create a channel!")
       this.permissions.forEach(perm => {
+        console.log({ perm })
         const permission = channel.addPermission(perm.name)
         permission.setValue(perm.value)
         if (perm.skip) permission.setSkip(true)
@@ -430,13 +467,16 @@ registerPlugin<Config>({
      * @param name channel name to check
      */
     getNumberFromName(name: string) {
+      const replacement = this.names.find(n => n.value === name)
+      if (replacement) return replacement.number
       const match = name.match(this.regex)
       if (!match) return 0
-      const dec = parseInt(match[1], 10)
-      if (!isNaN(dec)) {
-        return dec
+      if ((/^\d+$/).test(match[1])) {
+        return parseInt(match[1], 10)
       } else if (Roman.isValid(match[1])) {
         return Roman.toArabic(match[1])
+      } else if ((/^([01]{4} ?)*$/).test(match[1])) {
+        return parseInt(match[1].split("").filter(char => ["0", "1"].includes(char)).join(""), 2)
       } else {
         return 0
       }
@@ -447,7 +487,23 @@ registerPlugin<Config>({
      * @param num 
      */
     getChannelName(num: number) {
-      const str = this.numeralMode === ExpandingChannelNumeral.DECIMAL ? String(num) : Roman.toRoman(num)
+      const name = this.names.find(n => n.number === num)
+      if (name) return name.value
+      const str = (() => {
+        switch (this.numeralMode) {
+          case ExpandingChannelNumeral.BINARY:
+            let str = num.toString(2)
+            if (str.length % 8 !== 0) {
+              str = new Array(8 - str.length % 8).fill("0").join("") + str
+            }
+            return str.split("").map((s, i) => ((i+1) % 4 === 0) ? `${s} ` : s).join("")
+          case ExpandingChannelNumeral.ROMAN:
+            return Roman.toRoman(num)
+          case ExpandingChannelNumeral.DECIMAL:
+          default:
+            return String(num)
+        }
+      })()
       return this.channelName.replace(/\%/, str)
     }
   }
