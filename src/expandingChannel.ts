@@ -14,6 +14,8 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * Changelog 1.3.0:
  * automatically convert UINT32 to INT32 for i_icon_id
  * implement support for various custom channel names
+ * Changelog 1.4.0:
+ * add a minimum amount of channels to keep
  */
 
 interface Config {
@@ -37,6 +39,7 @@ interface PermissionConfigEntry {
 interface ChannelConfig {
   parent: string
   name: string
+  minKeep: number
   minfree: number
   deleteDelay: number
   codec: string
@@ -79,6 +82,11 @@ registerPlugin<Config>({
       title: "Use Romand or Decimal numbers to show the channel count",
       options: ["Decimal", "Roman", "Binary"],
       default: "0"
+    }, {
+      type: "number" as const,
+      name: "minKeep",
+      title: "Minimum amount of channels to keep",
+      default: 1
     }, {
       type: "number" as const,
       name: "minfree",
@@ -247,6 +255,7 @@ registerPlugin<Config>({
   interface ExpandingChannelConfig {
     name: string
     parent: Channel
+    minimumKeep: number
     minimumFree: number
     regex: RegExp
     deleteDelay: number
@@ -266,6 +275,7 @@ registerPlugin<Config>({
 
     private channelName: string
     private parentChannel: Channel
+    private minimumKeep: number
     private minimumFree: number
     private regex: RegExp
     private deleteDelay: number
@@ -279,6 +289,7 @@ registerPlugin<Config>({
     constructor(config: ExpandingChannelConfig) {
       this.channelName = config.name
       this.parentChannel = config.parent
+      this.minimumKeep = config.minimumKeep
       this.minimumFree = config.minimumFree
       this.regex = config.regex
       this.deleteDelay = config.deleteDelay
@@ -342,6 +353,7 @@ registerPlugin<Config>({
       return new ExpandingChannel({
         name: config.name,
         parent,
+        minimumKeep: config.minfree > config.minKeep ? config.minfree : config.minKeep, 
         minimumFree: config.minfree,
         deleteDelay: config.deleteDelay * 1000,
         channelOpts,
@@ -374,10 +386,10 @@ registerPlugin<Config>({
       const channels = this.getSubChannels()
       this.updateChannels(channels)
       let freeChannels = this.getEmptyChannels().length
-      if (freeChannels > this.minimumFree) {
+      if (freeChannels > this.minimumFree && channels.length > this.minimumKeep) {
         if (this.deleteDelay === 0) return this.deleteChannels(channels)
         this.deleteWithDelay()
-      } else if (freeChannels < this.minimumFree) {
+      } else if (freeChannels < this.minimumFree || channels.length < this.minimumKeep) {
         clearTimeout(this.deleteTimeout)
         this.createChannels(channels, freeChannels)
       } else {
@@ -410,14 +422,17 @@ registerPlugin<Config>({
     private deleteChannels(channels: Channel[]) {
       const structure = this.getChannelStructureInfo(channels)
         .filter(({ channel }) => channel.getClientCount() === 0)
-      while (structure.length > this.minimumFree) {
-        structure.pop()!.channel.delete()
+      while (structure.length > this.minimumFree && channels.length > this.minimumKeep) {
+        const info = structure.pop()
+        if (!info) continue
+        channels = channels.filter(c => !c.equals(info.channel))
+        info.channel.delete()
       }
     }
 
     /** creates the required amount of channels */
     private createChannels(channels: Channel[], freeChannels: number) {
-      while (freeChannels++ < this.minimumFree) {
+      while (freeChannels++ < this.minimumFree || channels.length < this.minimumKeep) {
         const structure = this.getChannelStructureInfo(channels)
         const num = this.getNextFreeNumber(structure)
         channels.push(this.createChannel(num, (num === 1 || structure.length === 0) ? "0" : structure[num-2].channel.id()))
