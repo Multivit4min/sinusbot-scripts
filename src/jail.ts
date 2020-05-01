@@ -23,7 +23,7 @@ interface Config {
 registerPlugin<Config>({
   name: "Jail",
   engine: ">= 1.0.0",
-  version: "2.1.0",
+  version: "2.1.1",
   description: "Jail",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
@@ -189,6 +189,7 @@ registerPlugin<Config>({
         if (this.config.addJailOnMove === "0") return
         if (this.config.moveAllowAll !== "1" && !this.allowCommand(invoker)) return
         if (this.isProtected(client)) return
+        if (invoker.isSelf()) return
         this.add(client, this.config.moveTime * 1000)
         invoker.chat(`You jailed [URL=${client.getURL()}]${client.nick()}[/URL]!`)
       } else if (fromChannel && fromChannel.equals(this.getChannel())) {
@@ -398,17 +399,17 @@ registerPlugin<Config>({
     }
 
     url() {
-      return `[URL=client://0/${this.uid}~${this.nick}]${this.nick}[/URL]`
+      return `[URL=client://0/${this.uid}~${encodeURI(this.nick)}]${this.nick}[/URL]`
     }
 
     private calcTime(dividend: number, divisor: number, modulo: number = 0, suffix: string = "") {
       let time = Math.floor(dividend / divisor)
       if (time < 0) time = 0
-      if (modulo !== 0) time %= modulo
-      return `${time} ${suffix}${time === 1 ? "" : "s"}`
+      if (modulo > 0) time %= modulo
+      return `${time} ${suffix}${(!suffix || time === 1) ? "" : "s"}`
     }
 
-    timeTillRelease() {
+    secondsTillRelease() {
       return Math.floor((this.release - Date.now()) / 1000)
     }
 
@@ -418,19 +419,19 @@ registerPlugin<Config>({
     }
 
     getDays() {
-      return this.calcTime(this.timeTillRelease(), 24 * 60 * 60, -1, "day")
+      return this.calcTime(this.secondsTillRelease(), 24 * 60 * 60, -1, "day")
     }
 
     getHours() {
-      return this.calcTime(this.timeTillRelease(), 60 * 60, 60, "hour")
+      return this.calcTime(this.secondsTillRelease(), 60 * 60, 24, "hour")
     }
 
     getMinutes() {
-      return this.calcTime(this.timeTillRelease(), 60, 60, "minute")
+      return this.calcTime(this.secondsTillRelease(), 60, 60, "minute")
     }
 
     getSeconds() {
-      return this.calcTime(this.timeTillRelease(), 1, 60, "second")
+      return this.calcTime(this.secondsTillRelease(), 1, 60, "second")
     }
 
     shouldGetReleased() {
