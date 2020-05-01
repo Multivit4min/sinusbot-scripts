@@ -458,7 +458,6 @@ registerPlugin<Config>({
       })
       if (!channel) throw new Error("error while trying to create a channel!")
       this.permissions.forEach(perm => {
-        console.log({ perm })
         const permission = channel.addPermission(perm.name)
         permission.setValue(perm.value)
         if (perm.skip) permission.setSkip(true)
