@@ -24,7 +24,7 @@ registerPlugin<Config>({
   name: "Jail",
   engine: ">= 1.0.0",
   version: "2.1.1",
-  description: "Jail",
+  description: "allows you to lock in people in a defined channel",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
   vars: [{
