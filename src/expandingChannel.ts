@@ -16,6 +16,12 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * implement support for various custom channel names
  * Changelog 1.4.0:
  * add a minimum amount of channels to keep
+ * Changelog 1.5.0:
+ * add maximum amount of channels to create
+ * add possibility to remove voice encryption
+ * add possibility to keep order of channels and only delete if the bottom channels are empty
+ * removed joinpower from settings -> use permission i_channel_needed_join_power instead
+ * removed talkpower -> use permission i_client_needed_talk_power instead
  */
 
 interface Config {
@@ -40,15 +46,16 @@ interface ChannelConfig {
   parent: string
   name: string
   minKeep: number
+  maximumChannels: number
   minfree: number
   deleteDelay: number
+  deleteMode: string
   codec: string
   quality: string
-  talkpower: number
   maxClients: number
   numerals: string
-  joinpower: number
   description: string
+  disableEncryption: boolean
   topic: string
   names: NameReplaceConfig
   permissions: PermissionConfig
@@ -57,7 +64,7 @@ interface ChannelConfig {
 registerPlugin<Config>({
   name: "Expanding Channels",
   engine: ">= 1.0.0",
-  version: "1.3.0",
+  version: "1.5.0",
   description: "automatic channel creation tool based on need",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
@@ -94,9 +101,23 @@ registerPlugin<Config>({
       default: 1
     }, {
       type: "number" as const,
+      name: "maximumChannels",
+      title: "Maximum amount of channels to create (0 = unlimited)",
+      default: 0
+    }, {
+      type: "number" as const,
       name: "deleteDelay",
       title: "Delay in seconds till the channel gets deleted after someone left (0 to disable)",
       default: 0
+    }, {
+      type: "select" as const,
+      name: "deleteMode",
+      title: "Delete Mode",
+      options: [
+        "just delete",
+        "wait for bottom channels to empty"
+      ],
+      default: "0"
     }, {
       type: "select" as const,
       name: "codec",
@@ -111,19 +132,9 @@ registerPlugin<Config>({
       default: "9"
     }, {
       type: "number" as const,
-      name: "talkpower",
-      title: "required talkpower (0 to disable)",
-      default: 0
-    }, {
-      type: "number" as const,
       name: "maxClients",
       title: "maximum clients which are able to enter (-1 to disable)",
       default: -1
-    }, {
-      type: "number" as const,
-      name: "joinpower",
-      title: "required channel join power (0 to disable)",
-      default: 0
     }, {
       type: "string" as const,
       name: "topic",
@@ -134,6 +145,11 @@ registerPlugin<Config>({
       name: "description",
       title: "Channel description:",
       default: ""
+    }, {
+      type: "checkbox" as const,
+      name: "disableEncryption",
+      title: "disable voice encryption?",
+      default: false
     }, {
       type: "array" as const,
       name: "names",
@@ -246,6 +262,11 @@ registerPlugin<Config>({
     }
   }
 
+  enum DeleteMode {
+    SIMPLE = "0",
+    WAIT_EMPTY = "1"
+  }
+
   enum ExpandingChannelNumeral {
     DECIMAL = "0",
     ROMAN = "1",
@@ -257,8 +278,10 @@ registerPlugin<Config>({
     parent: Channel
     minimumKeep: number
     minimumFree: number
+    maximumChannels: number
     regex: RegExp
     deleteDelay: number
+    deleteMode: DeleteMode
     channelOpts: Omit<ChannelCreateParams, "name"|"parent">
     numeralMode: ExpandingChannelNumeral
     permissions: PermissionConfig
@@ -277,8 +300,10 @@ registerPlugin<Config>({
     private parentChannel: Channel
     private minimumKeep: number
     private minimumFree: number
+    private maximumChannels: number
     private regex: RegExp
     private deleteDelay: number
+    private deleteMode: DeleteMode
     private deleteTimeout: any
     private channelOpts: Omit<ChannelCreateParams, "name"|"parent"> = {}
     private deleteTimeoutActive: boolean = false
@@ -290,6 +315,7 @@ registerPlugin<Config>({
       this.channelName = config.name
       this.parentChannel = config.parent
       this.minimumKeep = config.minimumKeep
+      this.maximumChannels = config.maximumChannels
       this.minimumFree = config.minimumFree
       this.regex = config.regex
       this.deleteDelay = config.deleteDelay
@@ -297,6 +323,7 @@ registerPlugin<Config>({
       this.numeralMode = config.numeralMode
       this.permissions = config.permissions
       this.names = config.names
+      this.deleteMode = config.deleteMode
       this.handleMoveEvent()
       setTimeout(() => this.checkFreeChannels(), 2 * 1000)
     }
@@ -332,9 +359,9 @@ registerPlugin<Config>({
         codecQuality: parseInt(config.quality, 10) + 1,
         maxClients: config.maxClients,
         description: config.description,
-        topic: config.topic
+        topic: config.topic,
+        encrypted: !config.disableEncryption
       }
-      if (config.talkpower > 0) channelOpts.neededTalkPower = config.talkpower
       const permissions = (config.permissions||[]).filter(perm => perm.name !== "__INVALID__").map(perm => {
         if (perm.name !== "i_icon_id") return perm
         return {
@@ -350,12 +377,25 @@ registerPlugin<Config>({
           default: return ExpandingChannelNumeral.DECIMAL
         }
       })()
+      const deleteMode = (() => {
+        switch (config.deleteMode) {
+          case "0": return DeleteMode.SIMPLE
+          case "1": return DeleteMode.WAIT_EMPTY
+          default: return DeleteMode.SIMPLE
+        }
+      })()
+      let maximumChannels = 0
+      if (config.maximumChannels > 0) {
+        maximumChannels = config.minfree > config.maximumChannels ? config.minfree : config.maximumChannels
+      }
       return new ExpandingChannel({
         name: config.name,
         parent,
         minimumKeep: config.minfree > config.minKeep ? config.minfree : config.minKeep, 
         minimumFree: config.minfree,
+        maximumChannels,
         deleteDelay: config.deleteDelay * 1000,
+        deleteMode,
         channelOpts,
         permissions,
         names: (config.names||[]).filter(n => n.number > 0),
@@ -390,11 +430,20 @@ registerPlugin<Config>({
         if (this.deleteDelay === 0) return this.deleteChannels(channels)
         this.deleteWithDelay()
       } else if (freeChannels < this.minimumFree || channels.length < this.minimumKeep) {
+        if (this.channelLimitReached(channels.length)) return
         clearTimeout(this.deleteTimeout)
         this.createChannels(channels, freeChannels)
       } else {
         clearTimeout(this.deleteTimeout)
       }
+    }
+
+    /** checks if the amount of channel limit has been reached */
+    private channelLimitReached(amount: number) {
+      return (
+        this.maximumChannels > 0 &&
+        amount >= this.maximumChannels
+      )
     }
 
     /** updates all channel names or deletes them if the name does not match */
@@ -420,6 +469,17 @@ registerPlugin<Config>({
 
     /** deletes some amount of channels */
     private deleteChannels(channels: Channel[]) {
+      switch (this.deleteMode) {
+        default:
+        case DeleteMode.SIMPLE:
+          return this.deleteChannelsSimple(channels)
+        case DeleteMode.WAIT_EMPTY:
+          return this.deleteChannelsWaitEmpty(channels)
+      }
+    }
+
+    /** simply deletes all channels till required amount of keepchannels is reached */
+    private deleteChannelsSimple(channels: Channel[]) {
       const structure = this.getChannelStructureInfo(channels)
         .filter(({ channel }) => channel.getClientCount() === 0)
       while (structure.length > this.minimumFree && channels.length > this.minimumKeep) {
@@ -430,9 +490,26 @@ registerPlugin<Config>({
       }
     }
 
+    /** delete only channels which are below the channel with users in them */
+    private deleteChannelsWaitEmpty(channels: Channel[]) {
+      let structure = this.getChannelStructureInfo(channels).reverse()
+      let totalEmpty = structure.filter(({ channel }) => channel.getClientCount() === 0).length
+      let flagClients = false
+      structure = structure.filter(({ channel }) => {
+        if (channel.getClientCount() > 0) flagClients = true
+        return !flagClients && channel.getClientCount() === 0
+      })
+      while (totalEmpty > this.minimumFree && totalEmpty > this.minimumKeep) {
+        const info = structure.shift()
+        totalEmpty--
+        if (!info) continue
+        info.channel.delete()
+      }
+    }
+
     /** creates the required amount of channels */
     private createChannels(channels: Channel[], freeChannels: number) {
-      while (freeChannels++ < this.minimumFree || channels.length < this.minimumKeep) {
+      while ((freeChannels++ < this.minimumFree || channels.length < this.minimumKeep) && !this.channelLimitReached(channels.length)) {
         const structure = this.getChannelStructureInfo(channels)
         const num = this.getNextFreeNumber(structure)
         channels.push(this.createChannel(num, (num === 1 || structure.length === 0) ? "0" : structure[num-2].channel.id()))
@@ -452,7 +529,6 @@ registerPlugin<Config>({
         name: this.getChannelName(num),
         parent: this.parentChannel.id(),
         permanent: true,
-        encrypted: true,
         position,
         ...this.channelOpts
       })
