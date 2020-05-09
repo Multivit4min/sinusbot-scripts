@@ -22,6 +22,8 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * add possibility to keep order of channels and only delete if the bottom channels are empty
  * removed joinpower from settings -> use permission i_channel_needed_join_power instead
  * removed talkpower -> use permission i_client_needed_talk_power instead
+ * Changelog 1.5.1:
+ * fix channel deletion bug in mode wait bottom to empty
  */
 
 interface Config {
@@ -64,7 +66,7 @@ interface ChannelConfig {
 registerPlugin<Config>({
   name: "Expanding Channels",
   engine: ">= 1.0.0",
-  version: "1.5.0",
+  version: "1.5.1",
   description: "automatic channel creation tool based on need",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
@@ -496,13 +498,18 @@ registerPlugin<Config>({
       let totalEmpty = structure.filter(({ channel }) => channel.getClientCount() === 0).length
       let flagClients = false
       structure = structure.filter(({ channel }) => {
-        if (channel.getClientCount() > 0) flagClients = true
+        flagClients = flagClients || channel.getClientCount() > 0
         return !flagClients && channel.getClientCount() === 0
       })
-      while (totalEmpty > this.minimumFree && totalEmpty > this.minimumKeep) {
+      while (
+        totalEmpty > this.minimumFree &&
+        channels.length > this.minimumKeep &&
+        structure.length > 0
+      ) {
         const info = structure.shift()
         totalEmpty--
         if (!info) continue
+        channels = channels.filter(c => !c.equals(info.channel))
         info.channel.delete()
       }
     }
