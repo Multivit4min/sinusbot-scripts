@@ -23,7 +23,7 @@ interface Config {
 registerPlugin<Config>({
   name: "Jail",
   engine: ">= 1.0.0",
-  version: "2.1.1",
+  version: "2.1.2",
   description: "allows you to lock in people in a defined channel",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
@@ -468,6 +468,9 @@ registerPlugin<Config>({
     }
   }
 
+  
+  const jail = new Jail({ namespace: "jail_", ...config })
+
   event.on("load", () => {
     if (backend.isConnected()) return initialize()
     event.on("connect", initialize)
@@ -477,7 +480,6 @@ registerPlugin<Config>({
     if (initialized) return
     initialized = true
 
-    const jail = new Jail({ namespace: "jail_", ...config })
     const Command = require("command")
     if (!Command) return engine.log("command.js not found! Please be sure to install and enable command.js")
     const { createCommandGroup, createArgument, createGroupedArgument } = Command
@@ -539,4 +541,10 @@ registerPlugin<Config>({
 
     event.on("unload", () => jail.save())
   }
+
+
+  module.exports = {
+    jail
+  }
+
 })
