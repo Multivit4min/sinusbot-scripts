@@ -328,6 +328,7 @@ registerPlugin<Config>({
       this.deleteMode = config.deleteMode
       this.handleMoveEvent()
       setTimeout(() => this.checkFreeChannels(), 2 * 1000)
+      setInterval(() => this.checkFreeChannels(), 2 * 60 * 1000)
     }
 
     /** register events */
@@ -420,10 +421,14 @@ registerPlugin<Config>({
       })
     }
 
+    /**
+     * gets all empty relevant channels
+     */
     private getEmptyChannels() {
       return this.getSubChannels().filter(c => c.getClientCount() === 0)
     }
 
+    /** does a channel check and deletes channels if necessary */
     checkFreeChannels() {
       const channels = this.getSubChannels()
       this.updateChannels(channels)
