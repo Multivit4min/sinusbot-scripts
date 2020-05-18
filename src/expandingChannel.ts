@@ -24,6 +24,9 @@ import type { Channel, ChannelCreateParams } from "sinusbot/typings/interfaces/C
  * removed talkpower -> use permission i_client_needed_talk_power instead
  * Changelog 1.5.1:
  * fix channel deletion bug in mode wait bottom to empty
+ * Changelog 1.5.2:
+ * add function which checks every minutes for empty channels
+ * changed behaviour of delete timeout, channel will get deleted 10 seconds after a user moved last inside or outside the channels
  */
 
 interface Config {
@@ -66,7 +69,7 @@ interface ChannelConfig {
 registerPlugin<Config>({
   name: "Expanding Channels",
   engine: ">= 1.0.0",
-  version: "1.5.1",
+  version: "1.5.2",
   description: "automatic channel creation tool based on need",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
@@ -308,7 +311,6 @@ registerPlugin<Config>({
     private deleteMode: DeleteMode
     private deleteTimeout: any
     private channelOpts: Omit<ChannelCreateParams, "name"|"parent"> = {}
-    private deleteTimeoutActive: boolean = false
     private numeralMode: ExpandingChannelNumeral
     private permissions: PermissionConfig
     private names: NameReplaceConfig
@@ -328,7 +330,7 @@ registerPlugin<Config>({
       this.deleteMode = config.deleteMode
       this.handleMoveEvent()
       setTimeout(() => this.checkFreeChannels(), 2 * 1000)
-      setInterval(() => this.checkFreeChannels(), 2 * 60 * 1000)
+      setInterval(() => this.checkFreeChannels(), 60 * 1000)
     }
 
     /** register events */
@@ -434,7 +436,7 @@ registerPlugin<Config>({
       this.updateChannels(channels)
       let freeChannels = this.getEmptyChannels().length
       if (freeChannels > this.minimumFree && channels.length > this.minimumKeep) {
-        if (this.deleteDelay === 0) return this.deleteChannels(channels)
+        if (this.deleteDelay === 0) return this.deleteChannels()
         this.deleteWithDelay()
       } else if (freeChannels < this.minimumFree || channels.length < this.minimumKeep) {
         if (this.channelLimitReached(channels.length)) return
@@ -447,10 +449,7 @@ registerPlugin<Config>({
 
     /** checks if the amount of channel limit has been reached */
     private channelLimitReached(amount: number) {
-      return (
-        this.maximumChannels > 0 &&
-        amount >= this.maximumChannels
-      )
+      return (this.maximumChannels > 0 && amount >= this.maximumChannels)
     }
 
     /** updates all channel names or deletes them if the name does not match */
@@ -466,27 +465,25 @@ registerPlugin<Config>({
 
     /** starts a delay to delete channels */
     private deleteWithDelay() {
-      if (this.deleteTimeoutActive) return
-      this.deleteTimeoutActive = true
+      clearInterval(this.deleteTimeout)
       this.deleteTimeout = setTimeout(() => {
-        this.deleteTimeoutActive = false
-        this.deleteChannels(this.getSubChannels())
+        this.deleteChannels()
       }, this.deleteDelay)
     }
 
     /** deletes some amount of channels */
-    private deleteChannels(channels: Channel[]) {
+    private deleteChannels() {
       switch (this.deleteMode) {
-        default:
         case DeleteMode.SIMPLE:
-          return this.deleteChannelsSimple(channels)
+          return this.deleteChannelsSimple()
         case DeleteMode.WAIT_EMPTY:
-          return this.deleteChannelsWaitEmpty(channels)
+          return this.deleteChannelsWaitEmpty()
       }
     }
 
     /** simply deletes all channels till required amount of keepchannels is reached */
-    private deleteChannelsSimple(channels: Channel[]) {
+    private deleteChannelsSimple() {
+      let channels = this.getSubChannels()
       const structure = this.getChannelStructureInfo(channels)
         .filter(({ channel }) => channel.getClientCount() === 0)
       while (structure.length > this.minimumFree && channels.length > this.minimumKeep) {
@@ -498,7 +495,8 @@ registerPlugin<Config>({
     }
 
     /** delete only channels which are below the channel with users in them */
-    private deleteChannelsWaitEmpty(channels: Channel[]) {
+    private deleteChannelsWaitEmpty() {
+      let channels = this.getSubChannels()
       let structure = this.getChannelStructureInfo(channels).reverse()
       let totalEmpty = structure.filter(({ channel }) => channel.getClientCount() === 0).length
       let flagClients = false
