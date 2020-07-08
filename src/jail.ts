@@ -299,9 +299,11 @@ registerPlugin<Config>({
         client.chat("You can not run away from justice!")
         client.moveTo(this.getChannel())
       }
-      const group = this.getServerGroup()
-      if (this.config.onServerGroup === "1" && !client.getServerGroups().some(g => g.id() === group.id())) {
-        client.addToServerGroup(group)
+      if (this.config.onServerGroup === "1") {
+        const group = this.getServerGroup()
+        if (!client.getServerGroups().some(g => g.id() === group.id())) {
+          client.addToServerGroup(group)
+        }
       }
     }
 
