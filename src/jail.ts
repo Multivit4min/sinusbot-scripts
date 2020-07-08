@@ -23,7 +23,7 @@ interface Config {
 registerPlugin<Config>({
   name: "Jail",
   engine: ">= 1.0.0",
-  version: "2.1.2",
+  version: "2.1.3",
   description: "allows you to lock in people in a defined channel",
   author: "Multivitamin <david.kartnaller@gmail.com",
   backends: ["ts3"],
