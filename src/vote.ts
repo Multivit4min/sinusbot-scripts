@@ -19,7 +19,7 @@ registerPlugin<{
 }>({
   name: "Vote Reward",
   engine: ">= 1.0.0",
-  version: "1.1.0",
+  version: "1.1.1",
   description: "Group Vote Rewards for TeamSpeakServers.org",
   author: "Multivitamin <david.kartnaller@gmail.com",
   requiredModules: ["http"],
@@ -173,7 +173,7 @@ registerPlugin<{
     /** checks if the item is too old to get added or still be hold in store */
     private isOld(item: PartialVoteItem) {
       if (removeAfter === -1) return false
-      return item.timestamp < Math.floor(Date.now() / 1000) - removeAfter
+      return Math.floor(item.timestamp-1000) < Math.floor(Date.now() / 1000) - removeAfter
     }
   
     /** retrieves the hash value of an item */
